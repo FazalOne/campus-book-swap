@@ -2583,6 +2583,26 @@ const MyBooksPage: React.FC<{
 		}
 	};
 
+	const handleRelist = async (e: React.MouseEvent, book: Book) => {
+		e.stopPropagation();
+		if (
+			!window.confirm(
+				t("Are you sure you want to relist this book?") || "Relist this book?",
+			)
+		)
+			return;
+		try {
+			await api.put(`/books/${book.id}`, {
+				...book,
+				forSwap: true,
+				status: BookStatus.AVAILABLE,
+			});
+			fetchMyBooks();
+		} catch (err: any) {
+			alert("Relist failed: " + (err.message || err));
+		}
+	};
+
 	const displayedBooks = myBooks.filter((book) => {
 		const isActive =
 			book.status === BookStatus.AVAILABLE ||
@@ -2649,10 +2669,121 @@ const MyBooksPage: React.FC<{
 								>
 									<PencilIcon className="w-4 h-4" />
 								</button>
+								{showHistory && book.status === BookStatus.SWAPPED && (
+									<button
+										onClick={(e) => handleRelist(e, book)}
+										className="bg-white text-green-600 p-1.5 rounded-full shadow hover:bg-green-50"
+										title={t("btn.relist") || "Relist"}
+									>
+										<PlusCircleIcon className="w-4 h-4" />
+									</button>
+								)}
 								<button
 									onClick={(e) => handleDelete(e, book.id)}
 									className="bg-white text-red-600 p-1.5 rounded-full shadow hover:bg-red-50"
 									title={t("btn.delete")}
+								>
+									<TrashIcon className="w-4 h-4" />
+								</button>
+							</div>
+						</div>
+					))}
+				</div>
+			)}
+		</div>
+	);
+};
+
+// MyListingsPage
+const MyListingsPage: React.FC<{
+	onViewDetails: (book: Book) => void;
+	onEditBook: (book: Book) => void;
+}> = ({ onViewDetails, onEditBook }) => {
+	const [listings, setListings] = useState<Book[]>([]);
+	const { user } = useAuth();
+	const { t } = useLanguage();
+	const navigate = useNavigate();
+
+	const fetchListings = async () => {
+		if (!user) return;
+		try {
+			const all = await api.get<Book[]>("/books");
+			setListings(
+				all.filter((b) => b.ownerId === user.id && (b.forSwap || b.forSale)),
+			);
+		} catch (e) {
+			console.error(e);
+		}
+	};
+
+	useEffect(() => {
+		fetchListings();
+	}, [user]);
+
+	const handleUnlist = async (e: React.MouseEvent, book: Book) => {
+		e.stopPropagation();
+		if (
+			!window.confirm(
+				t("Are you sure you want to unlist this book?") || "Unlist this book?",
+			)
+		)
+			return;
+		try {
+			await api.put(`/books/${book.id}`, {
+				...book,
+				forSwap: false,
+				forSale: false,
+				status: BookStatus.AVAILABLE,
+			});
+			fetchListings();
+		} catch (err) {
+			alert("Unlist failed");
+		}
+	};
+
+	const handleEdit = (book: Book) => {
+		onEditBook(book);
+		navigate("/edit-book");
+	};
+
+	return (
+		<div className="container mx-auto p-4">
+			<div className="flex justify-between items-center mb-6">
+				<h2 className="text-2xl font-bold text-gray-800">
+					{t("my_listings.title")}
+				</h2>
+				<Link
+					to="/add-book"
+					className="bg-primary text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-600 transition shadow-sm"
+				>
+					<PlusCircleIcon className="w-5 h-5" /> {t("my_books.add_new")}
+				</Link>
+			</div>
+			{listings.length === 0 ? (
+				<div className="text-center py-12 bg-white rounded-lg shadow-sm border border-dashed border-gray-300">
+					<BookOpenIcon className="w-12 h-12 mx-auto text-gray-300 mb-3" />
+					<p className="text-gray-500 text-lg">{t("my_listings.empty")}</p>
+				</div>
+			) : (
+				<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+					{listings.map((book) => (
+						<div key={book.id} className="relative group">
+							<BookCard book={book} onViewDetails={onViewDetails} />
+							<div className="absolute top-2 right-2 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+								<button
+									onClick={(e) => {
+										e.stopPropagation();
+										handleEdit(book);
+									}}
+									className="bg-white text-blue-600 p-1.5 rounded-full shadow hover:bg-blue-50"
+									title={t("btn.edit")}
+								>
+									<PencilIcon className="w-4 h-4" />
+								</button>
+								<button
+									onClick={(e) => handleUnlist(e, book)}
+									className="bg-white text-yellow-600 p-1.5 rounded-full shadow hover:bg-yellow-50"
+									title="Unlist"
 								>
 									<TrashIcon className="w-4 h-4" />
 								</button>
@@ -3038,13 +3169,22 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 		}
 	};
 
-	const handleDeleteSwap = async (swapId: string) => {
+	const handleDeleteSwap = async (swap: SwapOffer) => {
 		if (!window.confirm("Delete this record?")) return;
 		try {
-			await api.delete(`/swaps/${swapId}`);
+			// If the swap is pending and the current user is the sender, treat as cancel (revert book statuses)
+			if (swap.status === SwapStatus.PENDING && swap.offeredById === user?.id) {
+				await api.put(`/swaps/${swap.id}/status`, {
+					status: SwapStatus.CANCELLED,
+					language,
+				});
+			} else {
+				// otherwise remove the record (server will revert statuses if needed)
+				await api.delete(`/swaps/${swap.id}`);
+			}
 			fetchData();
-		} catch (e) {
-			alert("Delete failed");
+		} catch (e: any) {
+			alert("Delete failed: " + (e.message || e));
 		}
 	};
 
@@ -3237,7 +3377,7 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 					)}
 					{swap.status === SwapStatus.PENDING && !isIncoming && (
 						<button
-							onClick={() => handleDeleteSwap(swap.id)}
+							onClick={() => handleDeleteSwap(swap)}
 							className="px-3 py-1.5 text-xs font-medium border border-gray-300 text-gray-600 rounded hover:bg-white transition"
 						>
 							{t("btn.cancel")}
@@ -3245,7 +3385,7 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 					)}
 					{swap.status !== SwapStatus.PENDING && (
 						<button
-							onClick={() => handleDeleteSwap(swap.id)}
+							onClick={() => handleDeleteSwap(swap)}
 							className="text-gray-400 hover:text-red-500 p-1"
 							title={t("btn.delete")}
 						>
@@ -3253,12 +3393,29 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 						</button>
 					)}
 					{swap.status === SwapStatus.ACCEPTED && (
-						<button
-							onClick={() => navigate("/messages")}
-							className="px-3 py-1.5 text-xs font-medium bg-primary text-white rounded hover:bg-blue-600 flex items-center gap-1 transition shadow-sm"
-						>
-							<ChatBubbleLeftRightIcon className="w-3 h-3" /> {t("btn.chat")}
-						</button>
+						<>
+							<button
+								onClick={() => navigate("/messages")}
+								className="px-3 py-1.5 text-xs font-medium bg-primary text-white rounded hover:bg-blue-600 flex items-center gap-1 transition shadow-sm"
+							>
+								<ChatBubbleLeftRightIcon className="w-3 h-3" /> {t("btn.chat")}
+							</button>
+							<button
+								onClick={() => {
+									if (
+										!window.confirm(
+											t("swaps.confirm_complete") ||
+												"Mark this swap as completed?",
+										)
+									)
+										return;
+									handleUpdateStatus(swap.id, SwapStatus.COMPLETED);
+								}}
+								className="px-3 py-1.5 text-xs font-medium bg-emerald-600 text-white rounded hover:bg-emerald-700 transition shadow-sm"
+							>
+								{t("btn.complete") || "Complete"}
+							</button>
+						</>
 					)}
 				</div>
 			</div>
@@ -3529,9 +3686,52 @@ const Footer: React.FC = () => {
 	);
 };
 
-  
-
-const LandingPage = () => { const { t } = useLanguage(); return ( <div className="flex flex-col items-center justify-center min-h-[75vh] text-center px-4 bg-gradient-to-b from-blue-50/50 to-white"> <div className="max-w-3xl"> <h1 className="text-4xl md:text-6xl font-extrabold text-primary mb-6"> {t("app.title")} </h1> <p className="text-xl md:text-2xl text-gray-600 mb-10 leading-relaxed max-w-2xl px-4 inline-block"> Buy, sell, and trade textbooks with students on your campus. Help the environment and save money every semester. </p> <div className="flex flex-col sm:flex-row gap-4 justify-center"> <Link to="/register" className="bg-primary text-white px-8 py-3 rounded-lg font-bold text-lg hover:bg-blue-700 shadow-lg hover:shadow-xl transition transform hover:-translate-y-1"> Get Started </Link> <Link to="/login" className="bg-white text-primary border-2 border-primary px-8 py-3 rounded-lg font-bold text-lg hover:bg-blue-50 shadow hover:shadow-md transition"> Log In </Link> </div> <div className="mt-12 flex justify-center opacity-70"> <img src="/academic-cap-illustration.svg" alt="" className="h-48" onError={(e) => ((e.target).style.display = "none")} /> </div> </div> </div> ); };
+const LandingPage = () => {
+	const { t } = useLanguage();
+	return (
+		<div className="flex flex-col items-center justify-center min-h-[75vh] text-center px-4 bg-gradient-to-b from-blue-50/50 to-white">
+			{" "}
+			<div className="max-w-3xl">
+				{" "}
+				<h1 className="text-4xl md:text-6xl font-extrabold text-primary mb-6">
+					{" "}
+					{t("app.title")}{" "}
+				</h1>{" "}
+				<p className="text-xl md:text-2xl text-gray-600 mb-10 leading-relaxed max-w-2xl px-4 inline-block">
+					{" "}
+					Buy, sell, and trade textbooks with students on your campus. Help the
+					environment and save money every semester.{" "}
+				</p>{" "}
+				<div className="flex flex-col sm:flex-row gap-4 justify-center">
+					{" "}
+					<Link
+						to="/register"
+						className="bg-primary text-white px-8 py-3 rounded-lg font-bold text-lg hover:bg-blue-700 shadow-lg hover:shadow-xl transition transform hover:-translate-y-1"
+					>
+						{" "}
+						Get Started{" "}
+					</Link>{" "}
+					<Link
+						to="/login"
+						className="bg-white text-primary border-2 border-primary px-8 py-3 rounded-lg font-bold text-lg hover:bg-blue-50 shadow hover:shadow-md transition"
+					>
+						{" "}
+						Log In{" "}
+					</Link>{" "}
+				</div>{" "}
+				<div className="mt-12 flex justify-center opacity-70">
+					{" "}
+					<img
+						src="/academic-cap-illustration.svg"
+						alt=""
+						className="h-48"
+						onError={(e) => (e.target.style.display = "none")}
+					/>{" "}
+				</div>{" "}
+			</div>{" "}
+		</div>
+	);
+};
 
 function App() {
 	const { user, loading, logout } = useAuth();
@@ -3731,6 +3931,17 @@ function App() {
 										user.role,
 									) && (
 										<Link
+											to="/my-listings"
+											className="text-gray-100 flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 transition"
+										>
+											<BookOpenIcon className="w-5 h-5" />
+											<span>{t("nav.my_listings")}</span>
+										</Link>
+									)}
+									{!["super_admin", "admin", "moderator"].includes(
+										user.role,
+									) && (
+										<Link
 											to="/swaps"
 											className="text-gray-100 flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 transition relative"
 										>
@@ -3856,13 +4067,22 @@ function App() {
 									{!["super_admin", "admin", "moderator"].includes(
 										user.role,
 									) && (
-										<Link
-											to="/my-books"
-											className="text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600"
-										>
-											<BookOpenIcon className="w-5 h-5" />
-											{t("nav.my_books")}
-										</Link>
+										<>
+											<Link
+												to="/my-books"
+												className="text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600"
+											>
+												<BookOpenIcon className="w-5 h-5" />
+												{t("nav.my_books")}
+											</Link>
+											<Link
+												to="/my-listings"
+												className="text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600"
+											>
+												<BookOpenIcon className="w-5 h-5" />
+												{t("nav.my_listings")}
+											</Link>
+										</>
 									)}
 									{!["super_admin", "admin", "moderator"].includes(
 										user.role,

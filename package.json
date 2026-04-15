@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "start": "node scripts/dev-start.cjs",
+    "dev:all": "node scripts/dev-start.cjs",
     "build": "vite build",
     "preview": "vite preview"
   },

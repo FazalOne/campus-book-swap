@@ -7,6 +7,7 @@ export default defineConfig(({ mode }) => {
     return {
       server: {
         port: 3000,
+        strictPort: true, // Prevents Vite from stealing port 3001 if 3000 is in use
         host: '0.0.0.0',
       },
       plugins: [react()],

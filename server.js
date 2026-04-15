@@ -508,108 +508,108 @@ app.post('/api/reports', authenticateToken, function (req, res) { return __await
     });
 }); });
 // Public Contact Form
-app.post('/api/contact', function (req, res) { return __awaiter(void 0, void 0, void 0, function () {
-    var _a, name, email, subject, message, e_13;
-    return __generator(this, function (_b) {
-        switch (_b.label) {
-            case 0:
-                _a = req.body, name = _a.name, email = _a.email, subject = _a.subject, message = _a.message;
-                if (!name || !email || !message)
-                    return [2 /*return*/, res.status(400).send("Missing required fields")];
-                _b.label = 1;
-            case 1:
-                _b.trys.push([1, 3, , 4]);
-                return [4 /*yield*/, pool.query('INSERT INTO contact_messages (name, email, subject, message, "createdAt") VALUES ($1, $2, $3, $4, $5)', [name, email, subject, message, new Date().toISOString()])];
-            case 2:
-                _b.sent();
+app.put('/api/swaps/:id/status', authenticateToken, async function (req, res) {
+    const { status, language } = req.body;
+    const currentUserId = req.user.id;
+    const isTr = language === 'tr';
+    try {
+        // load swap
+        const swapRes = await pool.query('SELECT * FROM swaps WHERE id = $1', [req.params.id]);
+        if (swapRes.rows.length === 0) return res.status(404).send('Swap not found');
+        const swap = swapRes.rows[0];
+
+        // permission checks
+        if ((status === 'Accepted' || status === 'Rejected') && String(currentUserId) !== String(swap.offeredToId)) {
+            return res.status(403).send('Access denied. Only the recipient can accept/reject.');
+        }
+        if (status === 'Cancelled' && String(currentUserId) !== String(swap.offeredById) && String(currentUserId) !== String(swap.offeredToId)) {
+            return res.status(403).send('Access denied.');
+        }
+        if (status === 'Completed' && String(currentUserId) !== String(swap.offeredById) && String(currentUserId) !== String(swap.offeredToId)) {
+            return res.status(403).send('Access denied.');
+        }
+
+        // Completed: perform ownership transfer in a transaction
+        if (status === 'Completed') {
+            if (swap.status !== 'Accepted') return res.status(400).send('Swap must be Accepted before completing.');
+            const client = await pool.connect();
+            try {
+                await client.query('BEGIN');
+                // transfer offered books to offeredToId
+                if (swap.offeredBookIds && Array.isArray(swap.offeredBookIds)) {
+                    for (const bookId of swap.offeredBookIds) {
+                        await client.query('UPDATE books SET "ownerId" = $1, status = $2, "forSwap" = $3, "forSale" = $4 WHERE id = $5', [swap.offeredToId, 'Swapped', false, false, bookId]);
+                    }
+                }
+                // transfer requested book to offeredById
+                if (swap.requestedBookId) {
+                    await client.query('UPDATE books SET "ownerId" = $1, status = $2, "forSwap" = $3, "forSale" = $4 WHERE id = $5', [swap.offeredById, 'Swapped', false, false, swap.requestedBookId]);
+                }
+
+                // mark swap as completed
+                await client.query('UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3', ['Completed', new Date().toISOString(), req.params.id]);
+
+                await client.query('COMMIT');
                 res.json({ success: true });
-                return [3 /*break*/, 4];
-            case 3:
-                e_13 = _b.sent();
-                console.error("Contact form error:", e_13);
-                res.status(500).send("Failed to save message");
-                return [3 /*break*/, 4];
-            case 4: return [2 /*return*/];
+            } catch (err) {
+                await client.query('ROLLBACK');
+                console.error('Completion failed:', err);
+                res.status(500).send('Failed to complete swap');
+            } finally {
+                client.release();
+            }
+            return;
         }
-    });
-}); });
-// Admin Contact Messages Routes
-app.get('/api/admin/contact-messages', authenticateToken, checkRole(['super_admin', 'admin']), function (req, res) { return __awaiter(void 0, void 0, void 0, function () {
-    var result, e_14;
-    return __generator(this, function (_a) {
-        switch (_a.label) {
-            case 0:
-                _a.trys.push([0, 2, , 3]);
-                return [4 /*yield*/, pool.query('SELECT * FROM contact_messages ORDER BY "createdAt" DESC')];
-            case 1:
-                result = _a.sent();
-                res.json(result.rows);
-                return [3 /*break*/, 3];
-            case 2:
-                e_14 = _a.sent();
-                console.error(e_14);
-                res.status(500).send("Failed to fetch messages");
-                return [3 /*break*/, 3];
-            case 3: return [2 /*return*/];
+
+        // Default: update status and then handle book/chat updates
+        const upd = await pool.query('UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3 RETURNING *', [status, new Date().toISOString(), req.params.id]);
+        if (!(upd.rowCount && upd.rowCount > 0)) return res.status(404).send('Swap not found');
+        const updatedSwap = upd.rows[0];
+
+        if (status === 'Accepted') {
+            await pool.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [updatedSwap.requestedBookId]);
+            if (updatedSwap.offeredBookIds && Array.isArray(updatedSwap.offeredBookIds)) {
+                for (const bookId of updatedSwap.offeredBookIds) {
+                    await pool.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [bookId]);
+                }
+            }
+
+            // find or create chat and notify
+            const otherUserId = updatedSwap.offeredById;
+            const bookRes = await pool.query('SELECT title FROM books WHERE id = $1', [updatedSwap.requestedBookId]);
+            const bookTitle = (bookRes.rows[0] && bookRes.rows[0].title) || 'the book';
+
+            const allChats = await pool.query('SELECT * FROM chats WHERE "participantIds" @> $1', [JSON.stringify([currentUserId.toString()])]);
+            let existingChat = allChats.rows.find(function (c) { return c.participantIds.includes(otherUserId.toString()); });
+            let chatId = '';
+            if (existingChat) {
+                chatId = existingChat.id;
+                await pool.query('UPDATE chats SET "hiddenBy" = $1, status = $2 WHERE id = $3', ['[]', 'accepted', chatId]);
+            } else {
+                chatId = "chat_" + Date.now();
+                await pool.query('INSERT INTO chats (id, "participantIds", "bookId", "lastMessageText", "lastMessageTimestamp", "unreadMessages", "hiddenBy", "lastSenderId", status, "clearedHistoryAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', [chatId, JSON.stringify([currentUserId.toString(), otherUserId.toString()]), updatedSwap.requestedBookId, isTr ? "Sohbet başlatıldı" : "Chat started", new Date().toISOString(), 0, '[]', currentUserId, 'accepted', '{}']);
+            }
+
+            const autoMsg = isTr ? "Merhaba! \"" + bookTitle + "\" için takas teklifini kabul ettim." : "Hello! I have accepted the swap offer for \"" + bookTitle + "\".";
+            const timestamp = new Date().toISOString();
+            await pool.query('INSERT INTO messages (id, "chatThreadId", "senderId", text, timestamp, "isRead", "type") VALUES ($1, $2, $3, $4, $5, $6, $7)', ["msg_" + Date.now() + "_auto", chatId, currentUserId, autoMsg, timestamp, false, 'text']);
+            await pool.query('UPDATE chats SET "lastMessageText" = $1, "lastMessageTimestamp" = $2, "unreadMessages" = "unreadMessages" + 1, "lastSenderId" = $4 WHERE id = $3', [autoMsg, timestamp, chatId, currentUserId]);
+        } else if (status === 'Rejected' || status === 'Cancelled') {
+            // revert book statuses
+            await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [updatedSwap.requestedBookId]);
+            if (updatedSwap.offeredBookIds && Array.isArray(updatedSwap.offeredBookIds)) {
+                for (const bookId of updatedSwap.offeredBookIds) {
+                    await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [bookId]);
+                }
+            }
         }
-    });
-}); });
-app.delete('/api/admin/contact-messages/:id', authenticateToken, checkRole(['super_admin', 'admin']), function (req, res) { return __awaiter(void 0, void 0, void 0, function () {
-    var e_15;
-    return __generator(this, function (_a) {
-        switch (_a.label) {
-            case 0:
-                _a.trys.push([0, 2, , 3]);
-                return [4 /*yield*/, pool.query('DELETE FROM contact_messages WHERE id = $1', [req.params.id])];
-            case 1:
-                _a.sent();
-                res.json({ success: true });
-                return [3 /*break*/, 3];
-            case 2:
-                e_15 = _a.sent();
-                res.status(500).send("Failed to delete message");
-                return [3 /*break*/, 3];
-            case 3: return [2 /*return*/];
-        }
-    });
-}); });
-app.post('/api/auth/register', function (req, res) { return __awaiter(void 0, void 0, void 0, function () {
-    var _a, username, password, firstName, lastName, email, phone, hashedPassword, avatarUrl, result, user, token, err_2;
-    return __generator(this, function (_b) {
-        switch (_b.label) {
-            case 0:
-                _a = req.body, username = _a.username, password = _a.password, firstName = _a.firstName, lastName = _a.lastName, email = _a.email, phone = _a.phone;
-                if (!username || !password || !firstName || !lastName)
-                    return [2 /*return*/, res.status(400).send('Required fields missing.')];
-                hashedPassword = bcryptjs_1.default.hashSync(password, 10);
-                avatarUrl = "https://ui-avatars.com/api/?name=".concat(firstName, "+").concat(lastName, "&background=random");
-                _b.label = 1;
-            case 1:
-                _b.trys.push([1, 3, , 4]);
-                return [4 /*yield*/, pool.query('INSERT INTO users (username, password_hash, first_name, last_name, email, phone, role, "avatarUrl") VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *', [username, hashedPassword, firstName, lastName, email || '', phone || '', 'user', avatarUrl])];
-            case 2:
-                result = _b.sent();
-                user = result.rows[0];
-                token = jsonwebtoken_1.default.sign({ id: user.id.toString(), username: user.username }, SECRET_KEY);
-                res.json({ user: { id: user.id.toString(), username: user.username, firstName: user.first_name, lastName: user.last_name, email: user.email, phone: user.phone, role: user.role, avatarUrl: user.avatarUrl }, token: token });
-                return [3 /*break*/, 4];
-            case 3:
-                err_2 = _b.sent();
-                if (err_2.code === '23505')
-                    res.status(400).send('This username is already taken.');
-                else
-                    res.status(500).send('Internal Server Error.');
-                return [3 /*break*/, 4];
-            case 4: return [2 /*return*/];
-        }
-    });
-}); });
-app.post('/api/auth/login', function (req, res) { return __awaiter(void 0, void 0, void 0, function () {
-    var _a, username, password, result, user, token, err_3;
-    return __generator(this, function (_b) {
-        switch (_b.label) {
-            case 0:
-                _a = req.body, username = _a.username, password = _a.password;
+
+        res.json({ success: true });
+    } catch (e) {
+        console.error(e);
+        res.status(500).send('Swap update error');
+    }
+});
                 _b.label = 1;
             case 1:
                 _b.trys.push([1, 3, , 4]);
@@ -1410,28 +1410,38 @@ app.post('/api/swaps', authenticateToken, function (req, res) { return __awaiter
         }
     });
 }); });
-app.delete('/api/swaps/:id', authenticateToken, function (req, res) { return __awaiter(void 0, void 0, void 0, function () {
-    var result, e_36;
-    return __generator(this, function (_a) {
-        switch (_a.label) {
-            case 0:
-                _a.trys.push([0, 2, , 3]);
-                return [4 /*yield*/, pool.query('DELETE FROM swaps WHERE id = $1', [req.params.id])];
-            case 1:
-                result = _a.sent();
-                if (result.rowCount && result.rowCount > 0)
-                    res.json({ success: true });
-                else
-                    res.status(404).send("Swap not found");
-                return [3 /*break*/, 3];
-            case 2:
-                e_36 = _a.sent();
-                res.status(500).send("Delete swap error");
-                return [3 /*break*/, 3];
-            case 3: return [2 /*return*/];
+app.delete('/api/swaps/:id', authenticateToken, async function (req, res) {
+    try {
+        // Ensure swap exists and requester is a participant
+        const swapRes = await pool.query('SELECT * FROM swaps WHERE id = $1', [req.params.id]);
+        if (swapRes.rows.length === 0) return res.status(404).send('Swap not found');
+        const swap = swapRes.rows[0];
+        const userId = req.user.id;
+        if (String(swap.offeredById) !== String(userId) && String(swap.offeredToId) !== String(userId)) {
+            return res.status(403).send('Not authorized');
         }
-    });
-}); });
+
+        // Revert book statuses if they are in Requested/Reserved
+        try {
+            await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [swap.requestedBookId]);
+            if (swap.offeredBookIds && Array.isArray(swap.offeredBookIds)) {
+                for (const bookId of swap.offeredBookIds) {
+                    await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [bookId]);
+                }
+            }
+        } catch (e) {
+            // log and continue
+            console.error('Failed to revert book statuses on delete:', e);
+        }
+
+        const result = await pool.query('DELETE FROM swaps WHERE id = $1', [req.params.id]);
+        if (result.rowCount && result.rowCount > 0) res.json({ success: true });
+        else res.status(404).send('Swap not found');
+    } catch (e) {
+        console.error(e);
+        res.status(500).send('Delete swap error');
+    }
+});
 app.delete('/api/swaps/batch/clean', authenticateToken, function (req, res) { return __awaiter(void 0, void 0, void 0, function () {
     var userId, result, e_37;
     return __generator(this, function (_a) {

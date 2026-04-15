@@ -943,10 +943,31 @@ app.post('/api/swaps', authenticateToken, async (req, res) => {
 
 app.delete('/api/swaps/:id', authenticateToken, async (req, res) => {
     try {
+        // Ensure swap exists and requester is a participant
+        const swapRes = await pool.query('SELECT * FROM swaps WHERE id = $1', [req.params.id]);
+        if (swapRes.rows.length === 0) return res.status(404).send('Swap not found');
+        const swap = swapRes.rows[0];
+        const userId = (req as any).user.id;
+        if (String(swap.offeredById) !== String(userId) && String(swap.offeredToId) !== String(userId)) {
+            return res.status(403).send('Not authorized');
+        }
+
+        // Revert book statuses if they are in Requested/Reserved
+        try {
+            await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [swap.requestedBookId]);
+            if (swap.offeredBookIds && Array.isArray(swap.offeredBookIds)) {
+                for (const bookId of swap.offeredBookIds) {
+                    await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [bookId]);
+                }
+            }
+        } catch (e) {
+            console.error('Failed to revert book statuses on delete:', e);
+        }
+
         const result = await pool.query('DELETE FROM swaps WHERE id = $1', [req.params.id]);
         if (result.rowCount && result.rowCount > 0) res.json({ success: true });
-        else res.status(404).send("Swap not found");
-    } catch (e) { res.status(500).send("Delete swap error"); }
+        else res.status(404).send('Swap not found');
+    } catch (e) { console.error(e); res.status(500).send('Delete swap error'); }
 });
 
 app.delete('/api/swaps/batch/clean', authenticateToken, async (req, res) => {
@@ -962,39 +983,99 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
     const currentUserId = (req as any).user.id;
     const isTr = language === 'tr';
     try {
-        const result = await pool.query('UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3 RETURNING *', [status, new Date().toISOString(), req.params.id]);
-        if (result.rowCount && result.rowCount > 0) {
-            const swap = result.rows[0];
-            if (status === 'Accepted') {
-                await pool.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [swap.requestedBookId]);
-                if (swap.offeredBookIds) { for (const bookId of swap.offeredBookIds) { await pool.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [bookId]); } }
-            } else if (status === 'Rejected' || status === 'Cancelled') {
-                await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [swap.requestedBookId]);
-                if (swap.offeredBookIds) { for (const bookId of swap.offeredBookIds) { await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [bookId]); } }
-            }
-            if (status === 'Accepted') {
-                // Auto create chat - Swaps are forced to 'accepted' status immediately
-                const otherUserId = swap.offeredById;
-                const bookRes = await pool.query('SELECT title FROM books WHERE id = $1', [swap.requestedBookId]);
-                const bookTitle = bookRes.rows[0]?.title || 'the book';
-                let chatId = '';
-                const allChats = await pool.query('SELECT * FROM chats WHERE "participantIds" @> $1', [JSON.stringify([currentUserId.toString()])]);
-                const existingChat = allChats.rows.find((c: any) => c.participantIds.includes(otherUserId.toString()));
-                if (existingChat) {
-                    chatId = existingChat.id;
-                    await pool.query('UPDATE chats SET "hiddenBy" = $1, status = $2 WHERE id = $3', ['[]', 'accepted', chatId]);
-                } else {
-                    chatId = `chat_${Date.now()}`;
-                    await pool.query('INSERT INTO chats (id, "participantIds", "bookId", "lastMessageText", "lastMessageTimestamp", "unreadMessages", "hiddenBy", "lastSenderId", status, "clearedHistoryAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', [chatId, JSON.stringify([currentUserId.toString(), otherUserId.toString()]), swap.requestedBookId, isTr ? "Sohbet başlatıldı" : "Chat started", new Date().toISOString(), 0, '[]', currentUserId, 'accepted', '{}']);
+        // load swap
+        const swapRes = await pool.query('SELECT * FROM swaps WHERE id = $1', [req.params.id]);
+        if (swapRes.rows.length === 0) return res.status(404).send('Swap not found');
+        const swap = swapRes.rows[0];
+
+        // permission checks
+        if ((status === 'Accepted' || status === 'Rejected') && String(currentUserId) !== String(swap.offeredToId)) {
+            return res.status(403).send('Access denied. Only the recipient can accept/reject.');
+        }
+        if (status === 'Cancelled' && String(currentUserId) !== String(swap.offeredById) && String(currentUserId) !== String(swap.offeredToId)) {
+            return res.status(403).send('Access denied.');
+        }
+        if (status === 'Completed' && String(currentUserId) !== String(swap.offeredById) && String(currentUserId) !== String(swap.offeredToId)) {
+            return res.status(403).send('Access denied.');
+        }
+
+        // Completed: perform ownership transfer in a transaction
+        if (status === 'Completed') {
+            if (swap.status !== 'Accepted') return res.status(400).send('Swap must be Accepted before completing.');
+            const client = await pool.connect();
+            try {
+                await client.query('BEGIN');
+                // transfer offered books to offeredToId
+                if (swap.offeredBookIds && Array.isArray(swap.offeredBookIds)) {
+                    for (const bookId of swap.offeredBookIds) {
+                        await client.query('UPDATE books SET "ownerId" = $1, status = $2, "forSwap" = $3, "forSale" = $4 WHERE id = $5', [swap.offeredToId, 'Swapped', false, false, bookId]);
+                    }
                 }
-                const autoMsg = isTr ? `Merhaba! "${bookTitle}" için takas teklifini kabul ettim.` : `Hello! I have accepted the swap offer for "${bookTitle}".`;
-                const timestamp = new Date().toISOString();
-                await pool.query('INSERT INTO messages (id, "chatThreadId", "senderId", text, timestamp, "isRead", "type") VALUES ($1, $2, $3, $4, $5, $6, $7)', [`msg_${Date.now()}_auto`, chatId, currentUserId, autoMsg, timestamp, false, 'text']);
-                await pool.query('UPDATE chats SET "lastMessageText" = $1, "lastMessageTimestamp" = $2, "unreadMessages" = "unreadMessages" + 1, "lastSenderId" = $4 WHERE id = $3', [autoMsg, timestamp, chatId, currentUserId]);
+                // transfer requested book to offeredById
+                if (swap.requestedBookId) {
+                    await client.query('UPDATE books SET "ownerId" = $1, status = $2, "forSwap" = $3, "forSale" = $4 WHERE id = $5', [swap.offeredById, 'Swapped', false, false, swap.requestedBookId]);
+                }
+
+                // mark swap as completed
+                await client.query('UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3', ['Completed', new Date().toISOString(), req.params.id]);
+
+                await client.query('COMMIT');
+                res.json({ success: true });
+            } catch (err) {
+                await client.query('ROLLBACK');
+                console.error('Completion failed:', err);
+                res.status(500).send('Failed to complete swap');
+            } finally {
+                client.release();
             }
-            res.json({ success: true });
-        } else { res.status(500).send("Failed to update"); }
-    } catch (e) { res.status(500).send("Swap update error"); }
+            return;
+        }
+
+        // Default: update status and then handle book/chat updates
+        const upd = await pool.query('UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3 RETURNING *', [status, new Date().toISOString(), req.params.id]);
+        if (!(upd.rowCount && upd.rowCount > 0)) return res.status(404).send('Swap not found');
+        const updatedSwap = upd.rows[0];
+
+        if (status === 'Accepted') {
+            await pool.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [updatedSwap.requestedBookId]);
+            if (updatedSwap.offeredBookIds && Array.isArray(updatedSwap.offeredBookIds)) {
+                for (const bookId of updatedSwap.offeredBookIds) {
+                    await pool.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [bookId]);
+                }
+            }
+
+            // find or create chat and notify
+            const otherUserId = updatedSwap.offeredById;
+            const bookRes = await pool.query('SELECT title FROM books WHERE id = $1', [updatedSwap.requestedBookId]);
+            const bookTitle = (bookRes.rows[0] && bookRes.rows[0].title) || 'the book';
+
+            const allChats = await pool.query('SELECT * FROM chats WHERE "participantIds" @> $1', [JSON.stringify([currentUserId.toString()])]);
+            let existingChat = allChats.rows.find(function (c: any) { return c.participantIds.includes(otherUserId.toString()); });
+            let chatId = '';
+            if (existingChat) {
+                chatId = existingChat.id;
+                await pool.query('UPDATE chats SET "hiddenBy" = $1, status = $2 WHERE id = $3', ['[]', 'accepted', chatId]);
+            } else {
+                chatId = `chat_${Date.now()}`;
+                await pool.query('INSERT INTO chats (id, "participantIds", "bookId", "lastMessageText", "lastMessageTimestamp", "unreadMessages", "hiddenBy", "lastSenderId", status, "clearedHistoryAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)', [chatId, JSON.stringify([currentUserId.toString(), otherUserId.toString()]), updatedSwap.requestedBookId, isTr ? "Sohbet başlatıldı" : "Chat started", new Date().toISOString(), 0, '[]', currentUserId, 'accepted', '{}']);
+            }
+
+            const autoMsg = isTr ? `Merhaba! "${bookTitle}" için takas teklifini kabul ettim.` : `Hello! I have accepted the swap offer for "${bookTitle}".`;
+            const timestamp = new Date().toISOString();
+            await pool.query('INSERT INTO messages (id, "chatThreadId", "senderId", text, timestamp, "isRead", "type") VALUES ($1, $2, $3, $4, $5, $6, $7)', [`msg_${Date.now()}_auto`, chatId, currentUserId, autoMsg, timestamp, false, 'text']);
+            await pool.query('UPDATE chats SET "lastMessageText" = $1, "lastMessageTimestamp" = $2, "unreadMessages" = "unreadMessages" + 1, "lastSenderId" = $4 WHERE id = $3', [autoMsg, timestamp, chatId, currentUserId]);
+        } else if (status === 'Rejected' || status === 'Cancelled') {
+            // revert book statuses
+            await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [updatedSwap.requestedBookId]);
+            if (updatedSwap.offeredBookIds && Array.isArray(updatedSwap.offeredBookIds)) {
+                for (const bookId of updatedSwap.offeredBookIds) {
+                    await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [bookId]);
+                }
+            }
+        }
+
+        res.json({ success: true });
+    } catch (e) { console.error(e); res.status(500).send('Swap update error'); }
 });
 
 app.listen(PORT, HOST, () => {
