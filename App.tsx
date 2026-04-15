@@ -2556,7 +2556,7 @@ const MyBooksPage: React.FC<{
 }> = ({ onViewDetails, onEditBook }) => {
 	// ... (MyBooksPage content unchanged)
 	const [myBooks, setMyBooks] = useState<Book[]>([]);
-	const [showHistory, setShowHistory] = useState(false);
+	const [showListed, setShowListed] = useState(false);
 	const { user } = useAuth();
 	const { t } = useLanguage();
 
@@ -2583,32 +2583,18 @@ const MyBooksPage: React.FC<{
 		}
 	};
 
-	const handleRelist = async (e: React.MouseEvent, book: Book) => {
+	const handleRelist = (e: React.MouseEvent, book: Book) => {
 		e.stopPropagation();
-		if (
-			!window.confirm(
-				t("Are you sure you want to relist this book?") || "Relist this book?",
-			)
-		)
-			return;
-		try {
-			await api.put(`/books/${book.id}`, {
-				...book,
-				forSwap: true,
-				status: BookStatus.AVAILABLE,
-			});
-			fetchMyBooks();
-		} catch (err: any) {
-			alert("Relist failed: " + (err.message || err));
-		}
+		// Open edit form so user can set price and listing options before listing
+		onEditBook(book);
+		// navigate to edit page is handled by onEditBook consumer
 	};
 
 	const displayedBooks = myBooks.filter((book) => {
-		const isActive =
-			book.status === BookStatus.AVAILABLE ||
-			book.status === BookStatus.REQUESTED ||
-			book.status === BookStatus.RESERVED;
-		return showHistory ? !isActive : isActive;
+		// By default show only books NOT listed on marketplace (inventory)
+		if (!showListed) return !book.forSwap && !book.forSale;
+		// When toggled, show all owned books (both listed and unlisted)
+		return true;
 	});
 
 	return (
@@ -2617,21 +2603,16 @@ const MyBooksPage: React.FC<{
 				<h2 className="text-2xl font-bold text-gray-800">
 					{t("my_books.title")}
 				</h2>
-				<div className="flex gap-4">
-					<div className="flex bg-white rounded-lg shadow-sm border p-1">
-						<button
-							onClick={() => setShowHistory(false)}
-							className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${!showHistory ? "bg-primary text-white shadow" : "text-gray-500 hover:bg-gray-50"}`}
-						>
-							{t("my_books.active")}
-						</button>
-						<button
-							onClick={() => setShowHistory(true)}
-							className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${showHistory ? "bg-primary text-white shadow" : "text-gray-500 hover:bg-gray-50"}`}
-						>
-							{t("my_books.history")}
-						</button>
-					</div>
+				<div className="flex items-center gap-4">
+					<label className="flex items-center gap-2 text-sm">
+						<input
+							type="checkbox"
+							checked={showListed}
+							onChange={() => setShowListed((s) => !s)}
+							className="form-checkbox h-4 w-4"
+						/>
+						<span className="select-none">{t("my_books.show_listings")}</span>
+					</label>
 					<Link
 						to="/add-book"
 						className="bg-primary text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-600 transition shadow-sm"
@@ -2644,7 +2625,7 @@ const MyBooksPage: React.FC<{
 				<div className="text-center py-12 bg-white rounded-lg shadow-sm border border-dashed border-gray-300">
 					<BookOpenIcon className="w-12 h-12 mx-auto text-gray-300 mb-3" />
 					<p className="text-gray-500 text-lg">{t("my_books.empty")}</p>
-					{!showHistory && (
+					{!showListed && (
 						<Link
 							to="/add-book"
 							className="text-primary font-medium hover:underline mt-2 inline-block"
@@ -2669,7 +2650,7 @@ const MyBooksPage: React.FC<{
 								>
 									<PencilIcon className="w-4 h-4" />
 								</button>
-								{showHistory && book.status === BookStatus.SWAPPED && (
+								{showListed === true && (
 									<button
 										onClick={(e) => handleRelist(e, book)}
 										className="bg-white text-green-600 p-1.5 rounded-full shadow hover:bg-green-50"
@@ -2734,6 +2715,7 @@ const MyListingsPage: React.FC<{
 				forSwap: false,
 				forSale: false,
 				status: BookStatus.AVAILABLE,
+				price: null,
 			});
 			fetchListings();
 		} catch (err) {
@@ -2818,8 +2800,8 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 		condition: BookCondition.GOOD,
 		description: "",
 		imageUrl: "",
-		price: 0,
-		forSwap: true,
+		price: undefined,
+		forSwap: false,
 		forSale: false,
 		status: BookStatus.AVAILABLE,
 	});
@@ -2851,8 +2833,19 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 			return;
 		}
 
-		// Ensure numeric values are safe (handle empty string/NaN)
-		const safePrice = formData.price ? Number(formData.price) : 0;
+		// If listing for sale, require a price. Otherwise leave price null.
+		let safePrice: number | null = null;
+		if (formData.forSale) {
+			if (
+				formData.price === undefined ||
+				formData.price === null ||
+				Number.isNaN(Number(formData.price))
+			) {
+				alert(t("book.price") + " required when listing for sale.");
+				return;
+			}
+			safePrice = Number(formData.price);
+		}
 
 		setIsSubmitting(true);
 
@@ -3088,11 +3081,11 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 									type="number"
 									placeholder="Price"
 									className="w-24 border p-1 rounded text-sm"
-									value={formData.price}
+									value={formData.price ?? ""}
 									onChange={(e) =>
 										setFormData({
 											...formData,
-											price: parseFloat(e.target.value),
+											price: e.target.value === "" ? undefined : Number(e.target.value),
 										})
 									}
 								/>
@@ -4434,68 +4427,109 @@ function App() {
 								) : (
 									<div className="flex flex-col gap-2">
 										<div className="text-center text-gray-500 text-sm italic py-2 bg-gray-50 rounded">
-											{t("modal.your_listing")}
+											{selectedBook.forSwap || selectedBook.forSale
+												? t("modal.your_listing")
+												: t("modal.your_inventory")}
 										</div>
-										{/* Status Change Buttons for Owner */}
-										{selectedBook.status !== BookStatus.SOLD &&
-											selectedBook.status !== BookStatus.ARCHIVED && (
-												<div className="grid grid-cols-2 gap-2 mb-2">
+
+										{selectedBook.forSwap || selectedBook.forSale ? (
+											<>
+												{/* Status Change Buttons for Owner (only for listed items) */}
+												{selectedBook.status !== BookStatus.SOLD &&
+													selectedBook.status !== BookStatus.ARCHIVED && (
+														<div className="grid grid-cols-2 gap-2 mb-2">
+															<button
+																onClick={() =>
+																	handleUpdateBookStatus(
+																		selectedBook.id,
+																		BookStatus.SOLD,
+																	)
+																}
+																className="bg-emerald-100 text-emerald-700 py-2 rounded text-sm font-bold hover:bg-emerald-200"
+															>
+																{t("btn.mark_sold")}
+															</button>
+															<button
+																onClick={() =>
+																	handleUpdateBookStatus(
+																		selectedBook.id,
+																		BookStatus.SWAPPED,
+																	)
+																}
+																className="bg-purple-100 text-purple-700 py-2 rounded text-sm font-bold hover:bg-purple-200"
+															>
+																{t("btn.mark_swapped")}
+															</button>
+														</div>
+													)}
+												{selectedBook.status !== BookStatus.ARCHIVED && (
 													<button
 														onClick={() =>
 															handleUpdateBookStatus(
 																selectedBook.id,
-																BookStatus.SOLD,
+																BookStatus.ARCHIVED,
 															)
 														}
-														className="bg-emerald-100 text-emerald-700 py-2 rounded text-sm font-bold hover:bg-emerald-200"
+														className="w-full bg-gray-200 text-gray-700 py-2 rounded hover:bg-gray-300 text-sm font-semibold transition"
 													>
-														{t("btn.mark_sold")}
+														{t("btn.archive")}
 													</button>
+												)}
+												{selectedBook.status === BookStatus.ARCHIVED && (
 													<button
 														onClick={() =>
 															handleUpdateBookStatus(
 																selectedBook.id,
-																BookStatus.SWAPPED,
+																BookStatus.AVAILABLE,
 															)
 														}
-														className="bg-purple-100 text-purple-700 py-2 rounded text-sm font-bold hover:bg-purple-200"
+														className="w-full bg-blue-100 text-blue-700 py-2 rounded hover:bg-blue-200 text-sm font-semibold transition"
 													>
-														{t("btn.mark_swapped")}
+														{t("btn.unarchive")}
+													</button>
+												)}
+												<button
+													onClick={() => handleDeleteBook(selectedBook.id)}
+													className="w-full bg-red-50 text-red-600 py-2 rounded hover:bg-red-100 text-sm font-semibold border border-red-200 transition"
+												>
+													{t("btn.delete")}
+												</button>
+											</>
+										) : (
+											<>
+												<div className="grid grid-cols-1 gap-2 mb-2">
+													<button
+														onClick={() => {
+															setSelectedBook(null);
+															setEditingBook(selectedBook);
+															navigate("/edit-book");
+														}}
+														className="w-full bg-blue-100 text-blue-700 py-2 rounded hover:bg-blue-200 text-sm font-semibold transition"
+													>
+														{t("btn.list_on_marketplace")}
 													</button>
 												</div>
-											)}
-										{selectedBook.status !== BookStatus.ARCHIVED && (
-											<button
-												onClick={() =>
-													handleUpdateBookStatus(
-														selectedBook.id,
-														BookStatus.ARCHIVED,
-													)
-												}
-												className="w-full bg-gray-200 text-gray-700 py-2 rounded hover:bg-gray-300 text-sm font-semibold transition"
-											>
-												{t("btn.archive")}
-											</button>
+												{selectedBook.status !== BookStatus.ARCHIVED && (
+													<button
+														onClick={() =>
+															handleUpdateBookStatus(
+																selectedBook.id,
+																BookStatus.ARCHIVED,
+															)
+														}
+														className="w-full bg-gray-200 text-gray-700 py-2 rounded hover:bg-gray-300 text-sm font-semibold transition"
+													>
+														{t("btn.archive")}
+													</button>
+												)}
+												<button
+													onClick={() => handleDeleteBook(selectedBook.id)}
+													className="w-full bg-red-50 text-red-600 py-2 rounded hover:bg-red-100 text-sm font-semibold border border-red-200 transition"
+												>
+													{t("btn.delete")}
+												</button>
+											</>
 										)}
-										{selectedBook.status === BookStatus.ARCHIVED && (
-											<button
-												onClick={() =>
-													handleUpdateBookStatus(
-														selectedBook.id,
-														BookStatus.AVAILABLE,
-													)
-												}
-												className="w-full bg-blue-100 text-blue-700 py-2 rounded hover:bg-blue-200 text-sm font-semibold transition"
-											>
-												{t("btn.unarchive")}
-											</button>
-										)}
-										<button
-											onClick={() => handleDeleteBook(selectedBook.id)}
-											className="w-full bg-red-50 text-red-600 py-2 rounded hover:bg-red-100 text-sm font-semibold border border-red-200 transition"
-										>
-											{t("btn.delete")}
-										</button>
 									</div>
 								)}
 								{user.role === "super_admin" &&
