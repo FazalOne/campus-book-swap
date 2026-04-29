@@ -37,6 +37,16 @@ Includes admin moderation, demo data seeding, and offer audit visibility.
 - `types.ts` - shared frontend domain types
 - `scripts/dev-start.cjs` - launches backend + Vite together
 
+## Configuration files (what belongs on GitHub)
+
+| File | On GitHub? | Why |
+|------|------------|-----|
+| **`.gitignore`** | Yes | Tells Git to ignore `node_modules/`, `dist/`, `.env`, `.env.local`, etc. Every repo needs this. |
+| **`Dockerfile`** | Yes | Defines how to build/run the app image. Standard for “clone and `docker compose up`”. |
+| **`docker-compose.yml`** | Yes | Starts the app + Postgres together for local/demo. |
+| **`.dockerignore`** | Yes | Stops Docker from sending `node_modules`, `.git`, and secrets into the build context (faster, safer). Docker reads this file by name; it cannot be merged into the Dockerfile. |
+| **`.env` (you create)** | **No** | Copy the env block from **Local Development → step 4** into `.env`. Optional `.env.local` overrides; both are gitignored. |
+
 ## Local Development (Non-Docker)
 
 ### 1) Prerequisites
@@ -56,27 +66,33 @@ npm install
 CREATE DATABASE campusbookswap;
 ```
 
-### 4) Create env file
+### 4) Create `.env` in the project root
 
-```bash
-cp .env.example .env
+Create a file named `.env` (same folder as `package.json`) with at least:
+
+```env
+PORT=3001
+HOST=0.0.0.0
+JWT_SECRET=replace_with_long_random_secret
+JWT_EXPIRES_IN=12h
+CORS_ORIGIN=http://localhost:3000,http://127.0.0.1:3000
+BODY_LIMIT=10mb
+
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=campusbookswap
+DB_USER=postgres
+DB_PASSWORD=your_postgres_password
+
+SEED_ADMIN_USERNAME=admin
+SEED_ADMIN_PASSWORD=change_this_default
+
+VITE_API_URL=http://localhost:3001/api
 ```
 
-PowerShell:
+Then set **`DB_PASSWORD`** and **`JWT_SECRET`** to real values (and change seed admin credentials if you like).
 
-```powershell
-Copy-Item .env.example .env
-```
-
-### 5) Configure `.env`
-
-At minimum set:
-
-- `DB_PASSWORD`
-- `JWT_SECRET`
-- optional: `SEED_ADMIN_USERNAME`, `SEED_ADMIN_PASSWORD`
-
-### 6) Start app
+### 5) Start app
 
 ```bash
 npm run start
@@ -154,7 +170,7 @@ docker compose down -v
 
 ## Environment Variables
 
-From `.env.example`:
+Meaning of each variable (same as the `.env` template above):
 
 - `PORT` backend port (default `3001`)
 - `HOST` backend bind address
