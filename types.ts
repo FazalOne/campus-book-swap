@@ -34,6 +34,7 @@ export interface Book {
     forSale: boolean;
     listedDate: string;
     status: BookStatus;
+    inventoryTag?: string | null;
     favoriteCount?: number; // Added
     isFavorited?: boolean;  // Added
 }
@@ -106,10 +107,30 @@ export interface SwapOffer {
     offeredToUsername?: string; // Added
     offeredBookIds: string[];
     requestedBookId: string;
+    offerType?: "swap" | "buy";
+    offeredAmount?: number;
     status: SwapStatus;
     message?: string;
     creationDate: string;
     lastUpdateDate: string;
+    bookHistory?: BookOwnershipEvent[];
+}
+
+export interface BookOwnershipEvent {
+    id: number;
+    swapId?: string | null;
+    bookId?: string | null;
+    title?: string | null;
+    author?: string | null;
+    isbn?: string | null;
+    imageUrl?: string | null;
+    fromUserId?: string | null;
+    toUserId?: string | null;
+    fromUsername?: string | null;
+    toUsername?: string | null;
+    transferKind?: "swap" | "sale";
+    createdAt: string;
+    note?: string | null;
 }
 
 export interface OptionType {

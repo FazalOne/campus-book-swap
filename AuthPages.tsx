@@ -5,6 +5,7 @@ import { api } from './api';
 import { useAuth } from './AuthContext';
 import { User, AuthResponse } from './types';
 import { useLanguage } from './LanguageContext';
+import { ds } from './designSystem';
 
 export const LoginPage: React.FC = () => {
   const [username, setUsername] = useState('');
@@ -33,8 +34,8 @@ export const LoginPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-base_200 p-4">
-      <div className="max-w-md w-full bg-base_100 rounded-lg shadow-xl p-8">
+    <div className={`${ds.pageBg} flex items-center justify-center p-4`}>
+      <div className="max-w-md w-full rounded-2xl border border-slate-300/70 bg-white/95 shadow-xl p-8 backdrop-blur">
         <h2 className="text-3xl font-bold text-center text-primary mb-6">{t('app.title')}</h2>
         <h3 className="text-xl font-semibold text-center text-gray-700 mb-6">{t('nav.login')}</h3>
         {error && <div className="bg-red-100 text-red-700 p-3 rounded mb-4">{error}</div>}
@@ -44,7 +45,7 @@ export const LoginPage: React.FC = () => {
             <input 
               type="text" 
               required
-              className="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-primary focus:border-primary"
+              className={`${ds.input} mt-1 block w-full p-2`}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
             />
@@ -54,7 +55,7 @@ export const LoginPage: React.FC = () => {
             <input 
               type="password" 
               required
-              className="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-primary focus:border-primary"
+              className={`${ds.input} mt-1 block w-full p-2`}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
@@ -68,7 +69,7 @@ export const LoginPage: React.FC = () => {
               </button>
             </div>
           </div>
-          <button type="submit" className="w-full bg-primary text-white py-2 rounded-md hover:bg-blue-600 transition font-bold">
+          <button type="submit" className="w-full py-2 rounded-md font-bold bg-blue-600 text-white hover:bg-blue-700 transition shadow-sm">
             {t('nav.login')}
           </button>
         </form>
@@ -111,8 +112,8 @@ export const RegisterPage: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-base_200 p-4">
-      <div className="max-w-md w-full bg-base_100 rounded-lg shadow-xl p-8">
+    <div className={`${ds.pageBg} flex items-center justify-center p-4`}>
+      <div className="max-w-md w-full rounded-2xl border border-slate-300/70 bg-white/95 shadow-xl p-8 backdrop-blur">
         <h2 className="text-3xl font-bold text-center text-secondary mb-6">{t('nav.register')}</h2>
         {error && <div className="bg-red-100 text-red-700 p-3 rounded mb-4">{error}</div>}
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -122,7 +123,7 @@ export const RegisterPage: React.FC = () => {
                 <input 
                   type="text" 
                   required
-                  className="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-secondary focus:border-secondary"
+                  className={`${ds.input} mt-1 block w-full p-2`}
                   value={firstName}
                   onChange={(e) => setFirstName(e.target.value)}
                 />
@@ -132,7 +133,7 @@ export const RegisterPage: React.FC = () => {
                 <input 
                   type="text" 
                   required
-                  className="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-secondary focus:border-secondary"
+                  className={`${ds.input} mt-1 block w-full p-2`}
                   value={lastName}
                   onChange={(e) => setLastName(e.target.value)}
                 />
@@ -143,7 +144,7 @@ export const RegisterPage: React.FC = () => {
             <input 
               type="text" 
               required
-              className="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-secondary focus:border-secondary"
+              className={`${ds.input} mt-1 block w-full p-2`}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
             />
@@ -153,7 +154,7 @@ export const RegisterPage: React.FC = () => {
             <input 
               type="email" 
               required
-              className="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-secondary focus:border-secondary"
+              className={`${ds.input} mt-1 block w-full p-2`}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
@@ -163,7 +164,7 @@ export const RegisterPage: React.FC = () => {
             <input 
               type="tel" 
               required
-              className="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-secondary focus:border-secondary"
+              className={`${ds.input} mt-1 block w-full p-2`}
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
             />
@@ -173,12 +174,12 @@ export const RegisterPage: React.FC = () => {
             <input 
               type="password" 
               required
-              className="mt-1 block w-full p-2 border border-gray-300 rounded-md focus:ring-secondary focus:border-secondary"
+              className={`${ds.input} mt-1 block w-full p-2`}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
-          <button type="submit" className="w-full bg-secondary text-white py-2 rounded-md hover:bg-emerald-600 transition font-bold">
+          <button type="submit" className="w-full py-2 rounded-md font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition shadow-sm">
             {t('nav.register')}
           </button>
         </form>

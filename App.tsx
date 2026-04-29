@@ -21,12 +21,14 @@ import {
 	BookStatus,
 	Report,
 	ContactMessage,
+	BookOwnershipEvent,
 } from "./types";
 import { api } from "./api";
 import { useAuth } from "./AuthContext";
 import { useLanguage } from "./LanguageContext";
 import { LoginPage, RegisterPage } from "./AuthPages";
 import { DEPARTMENTS } from "./constants";
+import { ds } from "./designSystem";
 
 // --- Icons (Inline SVGs) ---
 const BookOpenIcon: React.FC<{ className?: string }> = ({ className }) => (
@@ -451,7 +453,7 @@ const BookCard: React.FC<{
 	const navigate = useNavigate();
 	const { user } = useAuth();
 
-	// Determine type from course or department
+	// Determine type from course or genre (stored in department field)
 	const bookType =
 		book.course ||
 		(book.department ? t(getDeptKey(book.department)) : t("dept.General"));
@@ -486,7 +488,7 @@ const BookCard: React.FC<{
 
 	return (
 		<div
-			className="bg-base_100 rounded-lg shadow-md overflow-hidden transition-transform hover:scale-[1.02] hover:shadow-lg cursor-pointer flex flex-col h-full bg-white relative"
+			className="book-card rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden transition-all hover:-translate-y-0.5 hover:shadow-xl hover:border-blue-200 cursor-pointer flex flex-col h-full bg-white relative"
 			onClick={() => onViewDetails(book)}
 		>
 			<div className="relative h-64 bg-gray-100 flex items-center justify-center">
@@ -541,6 +543,9 @@ const BookCard: React.FC<{
 							{t(getConditionKey(book.condition))}
 						</span>
 					</div>
+					<div className="text-[11px] text-gray-500">
+						Listed: {new Date(book.listedDate).toLocaleDateString()}
+					</div>
 
 					<div
 						className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 p-1 rounded -ml-1 transition"
@@ -556,9 +561,14 @@ const BookCard: React.FC<{
 
 				<div className="mt-auto flex justify-between items-center pt-3 border-t border-gray-100">
 					<div className="flex gap-2 flex-wrap">
+						{book.inventoryTag && (
+							<span className="bg-gray-100 text-gray-700 text-xs px-2 py-1 rounded font-semibold">
+								{book.inventoryTag.replaceAll("_", " ")}
+							</span>
+						)}
 						{book.forSale && (
 							<span className="bg-emerald-100 text-emerald-800 text-xs px-2 py-1 rounded font-semibold">
-								{book.price} TL
+								{t("book.for_sale")} {book.price ? `- ${book.price} TL` : ""}
 							</span>
 						)}
 						{book.forSwap && (
@@ -582,7 +592,7 @@ const ChatPage: React.FC<{
 	const { chatId } = useParams<{ chatId: string }>();
 	const navigate = useNavigate();
 	const { user } = useAuth();
-	const { t } = useLanguage();
+	const { t, language } = useLanguage();
 	const [threads, setThreads] = useState<
 		(ChatThread & { lastSenderId?: string; status?: string })[]
 	>([]);
@@ -594,6 +604,10 @@ const ChatPage: React.FC<{
 	const [isReportModalOpen, setIsReportModalOpen] = useState(false);
 	const [reportReason, setReportReason] = useState("");
 	const [isBlocked, setIsBlocked] = useState(false);
+	const [chatSearch, setChatSearch] = useState("");
+	const [isPinned, setIsPinned] = useState(false);
+	const [chatOffer, setChatOffer] = useState<SwapOffer | null>(null);
+	const [chatOfferBooks, setChatOfferBooks] = useState<{ [key: string]: Book }>({});
 
 	// Scroll management refs
 	const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -699,6 +713,57 @@ const ChatPage: React.FC<{
 		}
 	}, [chatId, activeThread?.status]);
 
+	useEffect(() => {
+		if (!chatId || !activeThread || !user) {
+			setChatOffer(null);
+			return;
+		}
+		const loadThreadOffer = async () => {
+			try {
+				const [swapsData, booksData] = await Promise.all([
+					api.get<SwapOffer[]>("/swaps"),
+					api.get<Book[]>("/books"),
+				]);
+				const bMap: { [key: string]: Book } = {};
+				booksData.forEach((b) => (bMap[b.id] = b));
+				setChatOfferBooks(bMap);
+				const me = String(user.id);
+				const other = String(
+					activeThread.participantIds.find((id) => String(id) !== me) || "",
+				);
+				const bookId = activeThread.bookId;
+				const pairOffers = swapsData
+					.filter((s) => {
+						const participantsMatch =
+							(String(s.offeredById) === me && String(s.offeredToId) === other) ||
+							(String(s.offeredById) === other && String(s.offeredToId) === me);
+						if (!participantsMatch) return false;
+						if (!bookId) return true;
+						return (
+							String(s.requestedBookId) === String(bookId) ||
+							(s.offeredBookIds || []).some((id) => String(id) === String(bookId))
+						);
+					})
+					.sort(
+						(a, b) =>
+							new Date(b.lastUpdateDate).getTime() -
+							new Date(a.lastUpdateDate).getTime(),
+					);
+				const best =
+					pairOffers.find((s) => s.status === SwapStatus.PENDING) ||
+					pairOffers.find((s) => s.status === SwapStatus.ACCEPTED) ||
+					pairOffers[0] ||
+					null;
+				setChatOffer(best);
+			} catch {
+				setChatOffer(null);
+			}
+		};
+		loadThreadOffer();
+		const interval = setInterval(loadThreadOffer, 3000);
+		return () => clearInterval(interval);
+	}, [chatId, activeThread?.id, activeThread?.bookId, user?.id]);
+
 	const handleSendMessage = async (
 		text: string,
 		type: "text" | "image" | "location" = "text",
@@ -762,6 +827,28 @@ const ChatPage: React.FC<{
 			setThreads(updatedThreads);
 		} catch (e) {
 			alert("Failed to decline request");
+		}
+	};
+
+	const handleChatOfferStatusUpdate = async (status: SwapStatus) => {
+		if (!chatOffer) return;
+		try {
+			await api.put(`/swaps/${chatOffer.id}/status`, { status, language });
+			const updatedSwaps = await api.get<SwapOffer[]>("/swaps");
+			const refreshed = updatedSwaps.find((s) => s.id === chatOffer.id) || null;
+			setChatOffer(refreshed);
+		} catch (e: any) {
+			alert("Offer action failed: " + (e.message || e));
+		}
+	};
+
+	const handleOfferBookOpen = async (bookId: string) => {
+		if (!onViewBook || !bookId) return;
+		try {
+			const book = await api.get<Book>(`/books/${bookId}`);
+			onViewBook(book);
+		} catch {
+			alert("Could not load book details.");
 		}
 	};
 
@@ -836,6 +923,31 @@ const ChatPage: React.FC<{
 		}
 	};
 
+	const handlePinToggle = async () => {
+		if (!chatId) return;
+		try {
+			if (isPinned) {
+				await api.delete(`/chats/${chatId}/pin`);
+				setIsPinned(false);
+			} else {
+				await api.post(`/chats/${chatId}/pin`, {});
+				setIsPinned(true);
+			}
+		} catch {
+			alert("Failed to update pin state");
+		}
+	};
+
+	const handleSearchInChat = async () => {
+		if (!chatId || !chatSearch.trim()) return;
+		try {
+			const found = await api.get<(ChatMessage & { type?: string })[]>(`/chats/${chatId}/search?q=${encodeURIComponent(chatSearch.trim())}`);
+			setMessages(found.reverse());
+		} catch {
+			alert("Search failed");
+		}
+	};
+
 	const handleCardClick = async (bookId: string) => {
 		if (!onViewBook) return;
 		try {
@@ -894,7 +1006,14 @@ const ChatPage: React.FC<{
 	const activeThreads = threads.filter((t) => !requestThreads.includes(t));
 
 	return (
-		<div className="container mx-auto p-4 h-[calc(100vh-64px)] flex gap-4">
+		<div className="container mx-auto p-4 max-w-6xl">
+			<div className="flex justify-between items-center mb-4">
+				<h2 className="text-2xl font-bold text-gray-800">{t("nav.messages")}</h2>
+				<div className="text-sm text-gray-500">
+					{activeThreads.length} active chats
+				</div>
+			</div>
+			<div className="h-[calc(100vh-128px)] flex gap-4">
 			<div
 				className={`w-full md:w-1/3 bg-base_100 p-4 rounded-lg shadow overflow-y-auto ${chatId ? "hidden md:block" : "block"}`}
 			>
@@ -931,7 +1050,9 @@ const ChatPage: React.FC<{
 					</div>
 				)}
 
-				<h2 className="text-xl font-bold mb-4">{t("nav.messages")}</h2>
+				<h3 className="text-sm font-bold text-gray-500 uppercase tracking-wider mb-3">
+					Active Chats
+				</h3>
 				{activeThreads.length === 0 && (
 					<p className="text-gray-500 text-sm">No active chats.</p>
 				)}
@@ -962,16 +1083,23 @@ const ChatPage: React.FC<{
 				))}
 			</div>
 			{chatId ? (
-				<div className="flex-1 bg-base_100 p-4 rounded-lg shadow flex flex-col h-full">
+				<div className={`${ds.surface} flex-1 p-4 flex flex-col h-full`}>
 					<div className="font-bold border-b pb-2 mb-2 flex justify-between items-center">
 						<div
-							className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 p-1 rounded transition"
+							className="flex items-center gap-2 cursor-pointer hover:bg-slate-100 p-1 rounded transition-all duration-200"
 							onClick={() => otherUserId && navigate(`/user/${otherUserId}`)}
 						>
 							<UserCircleIcon className="w-8 h-8 text-gray-400" />
 							<span className="text-lg">{otherUsername}</span>
 						</div>
 						<div className="flex items-center gap-2">
+							<button
+								onClick={handlePinToggle}
+								className={`p-2 rounded ${isPinned ? "text-yellow-600 bg-yellow-50" : "text-gray-400 hover:text-yellow-600 hover:bg-yellow-50"}`}
+								title={isPinned ? "Unpin chat" : "Pin chat"}
+							>
+								<StarIcon className="w-5 h-5" filled={isPinned} />
+							</button>
 							{/* Report Button */}
 							<button
 								onClick={() => setIsReportModalOpen(true)}
@@ -1018,15 +1146,12 @@ const ChatPage: React.FC<{
 								{t("chat.request_message").replace("{user}", otherUsername)}
 							</div>
 							<div className="flex gap-4 w-full justify-center">
-								<button
-									onClick={handleDeclineRequest}
-									className="px-6 py-2 bg-white border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 font-medium transition shadow-sm w-32"
-								>
+								<button onClick={handleDeclineRequest} className={`${ds.btnSecondary} px-6 py-2 w-32`}>
 									{t("chat.decline")}
 								</button>
 								<button
 									onClick={handleAcceptRequest}
-									className="px-6 py-2 bg-primary text-white rounded-md hover:bg-blue-600 font-medium transition shadow-sm w-32"
+									className={`${ds.btnPrimary} px-6 py-2 w-32`}
 								>
 									{t("chat.accept")}
 								</button>
@@ -1034,7 +1159,143 @@ const ChatPage: React.FC<{
 						</div>
 					)}
 
+					{chatOffer && (
+						<div className="bg-slate-50 border border-slate-200 rounded-md mb-2 p-2.5 shadow-sm">
+							<div className="flex items-center gap-1.5 mb-1.5">
+								<span className="text-xs font-bold uppercase px-2 py-1 rounded bg-indigo-100 text-indigo-700">
+									{chatOffer.offerType === "buy" ? "Buy Offer" : "Swap Offer"}
+								</span>
+								<span
+									className={`text-xs font-bold uppercase px-2 py-1 rounded ${
+										chatOffer.status === SwapStatus.PENDING
+											? "bg-yellow-100 text-yellow-700"
+											: chatOffer.status === SwapStatus.ACCEPTED
+												? "bg-green-100 text-green-700"
+												: chatOffer.status === SwapStatus.COMPLETED
+													? "bg-emerald-100 text-emerald-700"
+													: "bg-gray-100 text-gray-700"
+									}`}
+								>
+									{chatOffer.status}
+								</span>
+								<span className="text-[11px] text-gray-500 ml-auto">
+									Updated {new Date(chatOffer.lastUpdateDate).toLocaleString()}
+								</span>
+							</div>
+							<div className="text-xs text-gray-700 mb-1.5">
+								{chatOffer.offerType === "buy" ? (
+									<span>
+										Offer amount:{" "}
+										<strong>{chatOffer.offeredAmount ? `${chatOffer.offeredAmount} TL` : "-"}</strong>
+									</span>
+								) : (
+									<span>
+										Requested:{" "}
+										<button
+											type="button"
+											onClick={() => handleOfferBookOpen(chatOffer.requestedBookId)}
+											className="font-semibold text-primary hover:underline"
+											title="Open requested book details"
+										>
+											{chatOfferBooks[chatOffer.requestedBookId]?.title || "Unknown Book"}
+										</button>
+									</span>
+								)}
+							</div>
+							{chatOffer.requestedBookId && (
+								<div className="mb-1.5">
+									<button
+										type="button"
+										onClick={() => handleOfferBookOpen(chatOffer.requestedBookId)}
+										className="text-[11px] px-2 py-0.5 rounded border border-blue-200 text-blue-700 hover:bg-blue-50"
+									>
+										Open Requested Book
+									</button>
+									{chatOffer.offerType !== "buy" && chatOffer.offeredBookIds?.[0] && (
+										<button
+											type="button"
+											onClick={() => handleOfferBookOpen(chatOffer.offeredBookIds[0])}
+											className="ml-2 text-[11px] px-2 py-0.5 rounded border border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+										>
+											Open Offered Book
+										</button>
+									)}
+								</div>
+							)}
+							{chatOffer.message && (
+								<div className="text-[11px] text-gray-600 italic bg-gray-50 border border-gray-100 rounded px-2 py-1 mb-1.5">
+									"{chatOffer.message}"
+								</div>
+							)}
+							<div className="flex flex-wrap gap-1.5">
+								{chatOffer.status === SwapStatus.PENDING &&
+									String(chatOffer.offeredToId) === String(user?.id) && (
+										<>
+											<button
+												onClick={() =>
+													handleChatOfferStatusUpdate(SwapStatus.REJECTED)
+												}
+												className="px-2.5 py-1 text-[11px] font-medium border border-red-200 text-red-600 rounded hover:bg-red-50"
+											>
+												Reject
+											</button>
+											<button
+												onClick={() =>
+													handleChatOfferStatusUpdate(SwapStatus.ACCEPTED)
+												}
+												className="px-2.5 py-1 text-[11px] font-medium bg-secondary text-white rounded hover:bg-emerald-600"
+											>
+												Accept
+											</button>
+										</>
+									)}
+								{chatOffer.status === SwapStatus.PENDING &&
+									String(chatOffer.offeredById) === String(user?.id) && (
+										<button
+											onClick={() =>
+												handleChatOfferStatusUpdate(SwapStatus.CANCELLED)
+											}
+											className="px-2.5 py-1 text-[11px] font-medium border border-gray-300 text-gray-600 rounded hover:bg-gray-50"
+										>
+											Cancel Offer
+										</button>
+									)}
+								{chatOffer.status === SwapStatus.ACCEPTED && (
+									<button
+										onClick={() =>
+											handleChatOfferStatusUpdate(SwapStatus.COMPLETED)
+										}
+										className="px-2.5 py-1 text-[11px] font-medium bg-emerald-600 text-white rounded hover:bg-emerald-700"
+									>
+										Complete
+									</button>
+								)}
+								<button
+									onClick={() => navigate("/swaps")}
+									className="px-2.5 py-1 text-[11px] font-medium border border-blue-200 text-blue-600 rounded hover:bg-blue-50"
+								>
+									Open Offers Tab
+								</button>
+							</div>
+						</div>
+					)}
+
 					{/* Chat Messages Container with Scroll Ref */}
+					<div className="mb-2 flex gap-2">
+						<input
+							className="flex-1 border rounded px-3 py-1 text-sm"
+							placeholder="Search this chat..."
+							value={chatSearch}
+							onChange={(e) => setChatSearch(e.target.value)}
+							onKeyDown={(e) => e.key === "Enter" && handleSearchInChat()}
+						/>
+						<button
+							onClick={handleSearchInChat}
+							className="px-3 py-1 text-sm bg-gray-100 rounded hover:bg-gray-200"
+						>
+							Search
+						</button>
+					</div>
 					<div
 						className="flex-1 overflow-y-auto space-y-4 p-2"
 						ref={scrollContainerRef}
@@ -1185,7 +1446,7 @@ const ChatPage: React.FC<{
 					</div>
 				</div>
 			) : (
-				<div className="hidden md:flex flex-1 items-center justify-center text-gray-500 bg-white rounded-lg shadow">
+				<div className="hidden md:flex flex-1 items-center justify-center text-gray-500 bg-slate-100 rounded-lg shadow border border-slate-200">
 					<div className="text-center">
 						<ChatBubbleLeftRightIcon className="w-12 h-12 mx-auto mb-2 opacity-50" />
 						<p>{t("chat.select_chat")}</p>
@@ -1230,19 +1491,24 @@ const ChatPage: React.FC<{
 					</div>
 				</Modal>
 			)}
+			</div>
 		</div>
 	);
 };
 
 // ... AdminPanel ...
-const AdminPanel: React.FC = () => {
+const AdminPanel: React.FC<{ onViewDetails: (book: Book) => void }> = ({ onViewDetails }) => {
 	// ... (AdminPanel content unchanged)
 	const [users, setUsers] = useState<User[]>([]);
 	const [reports, setReports] = useState<Report[]>([]);
 	const [contactMessages, setContactMessages] = useState<ContactMessage[]>([]);
-	const [activeTab, setActiveTab] = useState<"users" | "reports" | "messages">(
-		"users",
-	);
+	const [activeTab, setActiveTab] = useState<
+		"users" | "reports" | "messages" | "swaps" | "completed" | "audit"
+	>("users");
+	const [adminSwaps, setAdminSwaps] = useState<any[]>([]);
+	const [offerAuditLogs, setOfferAuditLogs] = useState<any[]>([]);
+	const [offersView, setOffersView] = useState<"all" | "swap" | "buy">("all");
+	const [completedOffersFilter, setCompletedOffersFilter] = useState<"all" | "swap" | "buy">("all");
 	const [editingUser, setEditingUser] = useState<User | null>(null);
 	const [newPassword, setNewPassword] = useState("");
 	const { user } = useAuth();
@@ -1270,10 +1536,56 @@ const AdminPanel: React.FC = () => {
 			.catch((err) => alert("Failed to fetch messages: " + err.message));
 	};
 
+	const fetchAdminSwaps = () => {
+		api
+			.get<any[]>("/admin/swaps-details")
+			.then(setAdminSwaps)
+			.catch((err) => alert("Failed to fetch swap details: " + err.message));
+	};
+
+	const fetchOfferAuditLogs = () => {
+		api
+			.get<any[]>("/admin/offers-audit")
+			.then(setOfferAuditLogs)
+			.catch((err) => alert("Failed to fetch offers audit: " + err.message));
+	};
+
+	const handleDemoReset = async () => {
+		if (!window.confirm("Reset demo data?")) return;
+		try {
+			await api.post("/demo/reset", {});
+			alert("Demo reset complete");
+		} catch (e: any) {
+			alert("Demo reset failed: " + e.message);
+		}
+	};
+
+	const handleDemoSeed = async () => {
+		try {
+			await api.post("/demo/seed", {});
+			alert("Demo seed complete");
+		} catch (e: any) {
+			alert("Demo seed failed: " + e.message);
+		}
+	};
+
+	const handlePruneTestUsers = async () => {
+		if (!window.confirm("Delete all auto-generated test users (live_/deep_/feat_/demo_)?")) return;
+		try {
+			const result = await api.post<{ success: boolean; deletedUsers: number }>("/demo/prune-test-users", {});
+			alert(`Removed ${result.deletedUsers || 0} test users.`);
+			fetchUsers();
+		} catch (e: any) {
+			alert("Prune failed: " + e.message);
+		}
+	};
+
 	useEffect(() => {
 		if (["super_admin", "admin", "moderator"].includes(user?.role || "")) {
 			fetchUsers();
 			fetchReports();
+			fetchAdminSwaps();
+			fetchOfferAuditLogs();
 			if (["super_admin", "admin"].includes(user?.role || "")) {
 				fetchContactMessages();
 			}
@@ -1372,22 +1684,87 @@ const AdminPanel: React.FC = () => {
 		return false;
 	};
 
+	const statusBadgeClass = (status: string) => {
+		switch (status) {
+			case "Completed":
+				return "bg-emerald-100 text-emerald-700";
+			case "Accepted":
+				return "bg-blue-100 text-blue-700";
+			case "Pending":
+				return "bg-amber-100 text-amber-700";
+			case "Rejected":
+				return "bg-rose-100 text-rose-700";
+			case "Cancelled":
+				return "bg-gray-100 text-gray-700";
+			default:
+				return "bg-gray-100 text-gray-700";
+		}
+	};
+
+	/** Not yet completed: pending, accepted, rejected, cancelled, etc. */
+	const pendingOffers = adminSwaps.filter((s) => s.status !== SwapStatus.COMPLETED);
+	const visibleOffers = pendingOffers.filter((s) => {
+		const kind = s.offerType === "buy" ? "buy" : "swap";
+		if (offersView === "all") return true;
+		return offersView === kind;
+	});
+
+	const completedSwaps = adminSwaps.filter((s) => s.status === SwapStatus.COMPLETED);
+	const visibleCompletedSwaps = completedSwaps.filter((s) => {
+		const kind = s.offerType === "buy" ? "buy" : "swap";
+		if (completedOffersFilter === "all") return true;
+		return completedOffersFilter === kind;
+	});
+
+	const handleAdminBookView = async (bookData: any) => {
+		if (!bookData?.id) return;
+		try {
+			const fullBook = await api.get<Book>(`/books/${bookData.id}`);
+			onViewDetails(fullBook);
+		} catch {
+			// Fallback to available admin payload if direct fetch fails (e.g. historical/archived book)
+			onViewDetails(bookData as Book);
+		}
+	};
+
 	return (
-		<div className="container mx-auto p-4">
+		<div className="container mx-auto p-4 max-w-6xl">
 			<h1 className="text-3xl font-bold text-gray-800 mb-6">
 				{t("admin.title")}
 			</h1>
+			{["super_admin", "admin"].includes(user?.role || "") && (
+				<div className="mb-4 flex gap-2">
+					<button
+						onClick={handlePruneTestUsers}
+						className="px-3 py-2 rounded bg-orange-100 text-orange-700 font-semibold transition-all duration-200 ease-out hover:bg-orange-200 hover:-translate-y-0.5 hover:shadow-sm active:scale-[0.98]"
+					>
+						Clean Test Users
+					</button>
+					<button
+						onClick={handleDemoReset}
+						className="px-3 py-2 rounded bg-red-100 text-red-700 font-semibold transition-all duration-200 ease-out hover:bg-red-200 hover:-translate-y-0.5 hover:shadow-sm active:scale-[0.98]"
+					>
+						Demo Reset
+					</button>
+					<button
+						onClick={handleDemoSeed}
+						className="px-3 py-2 rounded bg-emerald-100 text-emerald-700 font-semibold transition-all duration-200 ease-out hover:bg-emerald-200 hover:-translate-y-0.5 hover:shadow-sm active:scale-[0.98]"
+					>
+						Demo Seed
+					</button>
+				</div>
+			)}
 
-			<div className="mb-4 flex space-x-2">
+				<div className="mb-4 flex space-x-2">
 				<button
 					onClick={() => setActiveTab("users")}
-					className={`px-4 py-2 rounded-lg font-bold ${activeTab === "users" ? "bg-primary text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}
+						className={`px-4 py-2 rounded-lg font-bold transition-all duration-200 ease-out active:scale-[0.98] ${activeTab === "users" ? "bg-primary text-white shadow-md" : "bg-gray-200 text-gray-700 hover:bg-gray-300 hover:-translate-y-0.5 hover:shadow-sm"}`}
 				>
 					{t("admin.tab.users")}
 				</button>
 				<button
 					onClick={() => setActiveTab("reports")}
-					className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 ${activeTab === "reports" ? "bg-primary text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}
+						className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-all duration-200 ease-out active:scale-[0.98] ${activeTab === "reports" ? "bg-primary text-white shadow-md" : "bg-gray-200 text-gray-700 hover:bg-gray-300 hover:-translate-y-0.5 hover:shadow-sm"}`}
 				>
 					{t("admin.tab.reports")}
 					{reports.length > 0 && (
@@ -1396,10 +1773,38 @@ const AdminPanel: React.FC = () => {
 						</span>
 					)}
 				</button>
+				<button
+					onClick={() => setActiveTab("swaps")}
+						className={`px-4 py-2 rounded-lg font-bold transition-all duration-200 ease-out active:scale-[0.98] flex items-center gap-2 ${activeTab === "swaps" ? "bg-primary text-white shadow-md" : "bg-gray-200 text-gray-700 hover:bg-gray-300 hover:-translate-y-0.5 hover:shadow-sm"}`}
+				>
+					Pending Offers
+					{pendingOffers.length > 0 && (
+						<span className="bg-amber-500 text-white text-xs px-2 py-0.5 rounded-full">
+							{pendingOffers.length}
+						</span>
+					)}
+				</button>
+				<button
+					onClick={() => setActiveTab("completed")}
+					className={`px-4 py-2 rounded-lg font-bold transition-all duration-200 ease-out active:scale-[0.98] flex items-center gap-2 ${activeTab === "completed" ? "bg-primary text-white shadow-md" : "bg-gray-200 text-gray-700 hover:bg-gray-300 hover:-translate-y-0.5 hover:shadow-sm"}`}
+				>
+					Completed Offers
+					{completedSwaps.length > 0 && (
+						<span className="bg-emerald-600 text-white text-xs px-2 py-0.5 rounded-full">
+							{completedSwaps.length}
+						</span>
+					)}
+				</button>
+				<button
+					onClick={() => setActiveTab("audit")}
+						className={`px-4 py-2 rounded-lg font-bold transition-all duration-200 ease-out active:scale-[0.98] ${activeTab === "audit" ? "bg-primary text-white shadow-md" : "bg-gray-200 text-gray-700 hover:bg-gray-300 hover:-translate-y-0.5 hover:shadow-sm"}`}
+				>
+					Offers Audit
+				</button>
 				{["super_admin", "admin"].includes(user?.role || "") && (
 					<button
 						onClick={() => setActiveTab("messages")}
-						className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 ${activeTab === "messages" ? "bg-primary text-white" : "bg-gray-200 text-gray-700 hover:bg-gray-300"}`}
+						className={`px-4 py-2 rounded-lg font-bold flex items-center gap-2 transition-all duration-200 ease-out active:scale-[0.98] ${activeTab === "messages" ? "bg-primary text-white shadow-md" : "bg-gray-200 text-gray-700 hover:bg-gray-300 hover:-translate-y-0.5 hover:shadow-sm"}`}
 					>
 						{t("admin.tab.messages")}
 						{contactMessages.length > 0 && (
@@ -1412,7 +1817,7 @@ const AdminPanel: React.FC = () => {
 			</div>
 
 			{activeTab === "users" ? (
-				<div className="overflow-x-auto bg-white rounded-lg shadow">
+				<div className="overflow-x-auto md-surface">
 					<table className="w-full text-left border-collapse min-w-[600px]">
 						<thead>
 							<tr className="bg-gray-100 border-b">
@@ -1485,7 +1890,7 @@ const AdminPanel: React.FC = () => {
 					</table>
 				</div>
 			) : activeTab === "reports" ? (
-				<div className="overflow-x-auto bg-white rounded-lg shadow">
+				<div className="overflow-x-auto md-surface">
 					<table className="w-full text-left border-collapse min-w-[600px]">
 						<thead>
 							<tr className="bg-gray-100 border-b">
@@ -1564,8 +1969,322 @@ const AdminPanel: React.FC = () => {
 						</tbody>
 					</table>
 				</div>
+			) : activeTab === "swaps" ? (
+				<div className="md-surface p-4">
+					<div className="mb-3">
+						<h2 className="text-lg font-bold text-gray-800">Pending offers</h2>
+						<p className="text-xs text-gray-500 mt-1 max-w-3xl">
+							All offers that are not completed yet (pending, accepted, rejected, cancelled, etc.). Completed offers are on the other tab.
+						</p>
+					</div>
+					<div className="flex flex-wrap items-center gap-2 mb-4">
+						<button
+							onClick={() => setOffersView("all")}
+							className={`px-3 py-1.5 rounded-full text-sm font-semibold ${offersView === "all" ? "bg-primary text-white" : "bg-gray-100 text-gray-700"}`}
+						>
+							All types
+						</button>
+						<button
+							onClick={() => setOffersView("swap")}
+							className={`px-3 py-1.5 rounded-full text-sm font-semibold ${offersView === "swap" ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-700"}`}
+						>
+							Swaps
+						</button>
+						<button
+							onClick={() => setOffersView("buy")}
+							className={`px-3 py-1.5 rounded-full text-sm font-semibold ${offersView === "buy" ? "bg-emerald-600 text-white" : "bg-emerald-50 text-emerald-700"}`}
+						>
+							Sales
+						</button>
+						<span className="ml-auto text-xs text-gray-500">
+							Showing {visibleOffers.length} of {pendingOffers.length} pending
+						</span>
+					</div>
+					{visibleOffers.length === 0 ? (
+						<div className="p-8 text-center text-gray-500 border rounded-lg bg-gray-50">
+							No pending offers match this filter.
+						</div>
+					) : (
+						<div className="space-y-4">
+							{visibleOffers.map((s) => (
+								<div key={s.id} className="border rounded-lg p-4 bg-gradient-to-b from-white to-gray-50">
+									<div className="flex flex-wrap items-center gap-2 mb-3">
+										<span className="text-xs font-mono text-gray-500">{s.id}</span>
+										<span className={`px-2 py-1 rounded-full text-xs font-bold ${statusBadgeClass(s.status)}`}>{s.status}</span>
+										<span className={`px-2 py-1 rounded-full text-xs font-bold ${s.offerType === "buy" ? "bg-emerald-100 text-emerald-700" : "bg-blue-100 text-blue-700"}`}>
+											{s.offerType === "buy" ? "BUY OFFER" : "SWAP OFFER"}
+										</span>
+										<span className="text-xs text-gray-500 ml-auto">{new Date(s.lastUpdateDate).toLocaleString()}</span>
+									</div>
+									<div className="text-sm text-gray-700 mb-3">
+										<span className="font-semibold">{s.offeredByUsername}</span> {"->"}{" "}
+										<span className="font-semibold">{s.offeredToUsername}</span>
+										{s.offerType === "buy" && (
+											<span className="ml-2 text-emerald-700 font-bold">
+												Offer Amount: {s.offeredAmount ? `${s.offeredAmount} TL` : "-"}
+											</span>
+										)}
+									</div>
+									<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+										<div className="md-surface p-3">
+											<p className="text-xs font-bold uppercase text-gray-500 mb-2">Requested Book</p>
+											{s.requestedBook ? (
+												<div className="flex gap-3">
+													<div className="w-16 h-20 bg-gray-100 rounded overflow-hidden border shrink-0">
+														<img
+															src={s.requestedBook.imageUrl || "https://via.placeholder.com/100?text=Book"}
+															alt={s.requestedBook.title}
+															className="w-full h-full object-cover"
+														/>
+													</div>
+													<div className="min-w-0">
+														<p className="font-semibold text-gray-800 truncate">{s.requestedBook.title}</p>
+														<p className="text-xs text-gray-600 truncate">{s.requestedBook.author || "Unknown author"}</p>
+														<p className="text-xs text-gray-500">Status: {s.requestedBook.status}</p>
+														<p className="text-xs text-gray-500">Owner ID: {s.requestedBook.ownerId || "-"}</p>
+														<div className="flex gap-1 mt-1 flex-wrap">
+															{s.requestedBook.forSale && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">For Sale</span>}
+															{s.requestedBook.forSwap && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">For Swap</span>}
+															{s.requestedBook.forSale && s.requestedBook.price ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">{s.requestedBook.price} TL</span> : null}
+														</div>
+														<button
+															type="button"
+															onClick={() => handleAdminBookView(s.requestedBook)}
+															className="mt-2 text-xs px-2 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50"
+														>
+															View Details
+														</button>
+													</div>
+												</div>
+											) : (
+												<p className="text-xs text-gray-400">No requested book</p>
+											)}
+										</div>
+										<div className="md-surface p-3">
+											<p className="text-xs font-bold uppercase text-gray-500 mb-2">
+												{s.offerType === "buy" ? "Payment Offer" : "Offered Books"}
+											</p>
+											{s.offerType === "buy" ? (
+												<p className="text-sm font-bold text-emerald-700">
+													{s.offeredAmount ? `${s.offeredAmount} TL` : "No amount provided"}
+												</p>
+											) : (
+												<div className="space-y-2">
+													{s.offeredBooks?.length ? s.offeredBooks.map((b: any) => (
+														<div key={b.id} className="flex gap-3 border rounded p-2 bg-gray-50">
+															<div className="w-12 h-16 bg-gray-100 rounded overflow-hidden border shrink-0">
+																<img
+																	src={b.imageUrl || "https://via.placeholder.com/100?text=Book"}
+																	alt={b.title}
+																	className="w-full h-full object-cover"
+																/>
+															</div>
+															<div className="min-w-0">
+																<p className="text-sm font-semibold truncate">{b.title}</p>
+																<p className="text-xs text-gray-600 truncate">{b.author || "Unknown author"}</p>
+																<p className="text-xs text-gray-500">Status: {b.status}</p>
+																<p className="text-xs text-gray-500">Owner ID: {b.ownerId || "-"}</p>
+																<button
+																	type="button"
+																	onClick={() => handleAdminBookView(b)}
+																	className="mt-1.5 text-[11px] px-2 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50"
+																>
+																	View Details
+																</button>
+															</div>
+														</div>
+													)) : <p className="text-xs text-gray-400">No offered books</p>}
+												</div>
+											)}
+										</div>
+									</div>
+									{s.message && <p className="text-xs text-gray-600 mt-3 italic">Message: {s.message}</p>}
+								</div>
+							))}
+						</div>
+					)}
+				</div>
+			) : activeTab === "completed" ? (
+				<div className="md-surface p-4">
+					<div className="mb-3">
+						<h2 className="text-lg font-bold text-gray-800">Completed offers</h2>
+						<p className="text-xs text-gray-500 mt-1 max-w-3xl">
+							Finished sales and swaps: requested/sold book and offered trade books. Open details from each card. Filter by swap vs sale.
+						</p>
+					</div>
+					<div className="flex flex-wrap items-center gap-2 mb-4">
+						<button
+							type="button"
+							onClick={() => setCompletedOffersFilter("all")}
+							className={`px-3 py-1.5 rounded-full text-sm font-semibold ${completedOffersFilter === "all" ? "bg-primary text-white" : "bg-gray-100 text-gray-700"}`}
+						>
+							All
+						</button>
+						<button
+							type="button"
+							onClick={() => setCompletedOffersFilter("swap")}
+							className={`px-3 py-1.5 rounded-full text-sm font-semibold ${completedOffersFilter === "swap" ? "bg-blue-600 text-white" : "bg-blue-50 text-blue-700"}`}
+						>
+							Swaps only
+						</button>
+						<button
+							type="button"
+							onClick={() => setCompletedOffersFilter("buy")}
+							className={`px-3 py-1.5 rounded-full text-sm font-semibold ${completedOffersFilter === "buy" ? "bg-emerald-600 text-white" : "bg-emerald-50 text-emerald-700"}`}
+						>
+							Sales only
+						</button>
+						<button
+							type="button"
+							onClick={() => {
+								fetchAdminSwaps();
+							}}
+							className="ml-auto text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50 font-semibold"
+						>
+							Refresh
+						</button>
+						<span className="text-xs text-gray-500">
+							{visibleCompletedSwaps.length} of {completedSwaps.length} completed
+						</span>
+					</div>
+					{visibleCompletedSwaps.length === 0 ? (
+						<div className="p-8 text-center text-gray-500 border rounded-lg bg-gray-50">
+							No completed offers match this filter.
+						</div>
+					) : (
+						<div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+							{visibleCompletedSwaps.map((s) => (
+								<div
+									key={s.id}
+									className="border border-emerald-200 rounded-lg p-4 bg-gradient-to-b from-emerald-50/40 to-white"
+								>
+									<div className="flex flex-wrap items-center gap-2 mb-3">
+										<span className="text-xs font-mono text-gray-500">{s.id}</span>
+										<span className={`px-2 py-1 rounded-full text-xs font-bold ${statusBadgeClass(s.status)}`}>
+											{s.status}
+										</span>
+										<span
+											className={`px-2 py-1 rounded-full text-xs font-bold ${s.offerType === "buy" ? "bg-emerald-100 text-emerald-700" : "bg-blue-100 text-blue-700"}`}
+										>
+											{s.offerType === "buy" ? "SALE" : "SWAP"}
+										</span>
+										<span className="text-xs text-gray-500 ml-auto">
+											{new Date(s.lastUpdateDate || s.creationDate).toLocaleString()}
+										</span>
+									</div>
+									<p className="text-sm text-gray-700 mb-3">
+										<span className="font-semibold">{s.offeredByUsername}</span>
+										{" → "}
+										<span className="font-semibold">{s.offeredToUsername}</span>
+										{s.offerType === "buy" && (
+											<span className="ml-2 text-emerald-700 font-bold text-sm">
+												Amount: {s.offeredAmount != null ? `${s.offeredAmount} TL` : "—"}
+											</span>
+										)}
+									</p>
+									<div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+										<div className="rounded-lg border border-slate-200 bg-white p-3">
+											<p className="text-xs font-bold uppercase text-slate-500 mb-2">Requested / sold book</p>
+											{s.requestedBook ? (
+												<div className="flex gap-3">
+													<div className="w-14 h-[4.5rem] bg-gray-100 rounded overflow-hidden border shrink-0">
+														<img
+															src={s.requestedBook.imageUrl || "https://via.placeholder.com/100?text=Book"}
+															alt={s.requestedBook.title}
+															className="w-full h-full object-cover"
+														/>
+													</div>
+													<div className="min-w-0 flex-1">
+														<p className="font-semibold text-gray-800 text-sm truncate">{s.requestedBook.title}</p>
+														<p className="text-xs text-gray-600 truncate">{s.requestedBook.author || "—"}</p>
+														<p className="text-[11px] text-gray-500 mt-0.5">Owner ID: {s.requestedBook.ownerId ?? "—"}</p>
+														<button
+															type="button"
+															onClick={() => handleAdminBookView(s.requestedBook)}
+															className="mt-2 text-[11px] px-2 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50"
+														>
+															View details
+														</button>
+													</div>
+												</div>
+											) : (
+												<p className="text-xs text-gray-400">No book on record</p>
+											)}
+										</div>
+										<div className="rounded-lg border border-slate-200 bg-white p-3">
+											<p className="text-xs font-bold uppercase text-slate-500 mb-2">
+												{s.offerType === "buy" ? "Buyer paid (cash offer)" : "Offered in trade"}
+											</p>
+											{s.offerType === "buy" ? (
+												<p className="text-sm text-gray-700">
+													Sale completed. See amount above; no physical book offered from buyer.
+												</p>
+											) : s.offeredBooks?.length ? (
+												<div className="space-y-2">
+													{s.offeredBooks.map((b: any) => (
+														<div key={b.id} className="flex gap-3 border border-slate-100 rounded p-2 bg-slate-50/80">
+															<div className="w-12 h-16 bg-gray-100 rounded overflow-hidden border shrink-0">
+																<img
+																	src={b.imageUrl || "https://via.placeholder.com/100?text=Book"}
+																	alt={b.title}
+																	className="w-full h-full object-cover"
+																/>
+															</div>
+															<div className="min-w-0 flex-1">
+																<p className="text-sm font-semibold truncate">{b.title}</p>
+																<p className="text-xs text-gray-600 truncate">{b.author || "—"}</p>
+																<button
+																	type="button"
+																	onClick={() => handleAdminBookView(b)}
+																	className="mt-1 text-[11px] px-2 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50"
+																>
+																	View details
+																</button>
+															</div>
+														</div>
+													))}
+												</div>
+											) : (
+												<p className="text-xs text-gray-400">No offered books recorded</p>
+											)}
+										</div>
+									</div>
+								</div>
+							))}
+						</div>
+					)}
+				</div>
+			) : activeTab === "audit" ? (
+				<div className="md-surface p-4">
+					<div className="flex justify-between items-center mb-3">
+						<h3 className="font-bold text-gray-800">Action Audit Log</h3>
+						<button
+							onClick={fetchOfferAuditLogs}
+							className="text-xs px-3 py-1 rounded border border-gray-300 hover:bg-gray-50"
+						>
+							Refresh
+						</button>
+					</div>
+					<div className="space-y-2 max-h-[520px] overflow-y-auto">
+						{offerAuditLogs.length === 0 && (
+							<div className="text-sm text-gray-500 p-4 border rounded bg-gray-50">No audit events yet.</div>
+						)}
+						{offerAuditLogs.map((log) => (
+							<div key={log.id} className="border rounded p-3 bg-gray-50">
+								<div className="flex flex-wrap gap-2 items-center text-xs">
+									<span className="font-mono text-gray-500">#{log.id}</span>
+									<span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-700 font-bold">{log.action}</span>
+									<span className="text-gray-600">Swap: <span className="font-mono">{log.swapId}</span></span>
+									<span className="text-gray-600">Actor: {log.actorUsername || log.actorId || "system"}</span>
+									<span className="ml-auto text-gray-500">{new Date(log.createdAt).toLocaleString()}</span>
+								</div>
+								{log.details && <p className="text-xs text-gray-600 mt-1">{log.details}</p>}
+							</div>
+						))}
+					</div>
+				</div>
 			) : (
-				<div className="overflow-x-auto bg-white rounded-lg shadow">
+				<div className="overflow-x-auto md-surface">
 					<table className="w-full text-left border-collapse min-w-[600px]">
 						<thead>
 							<tr className="bg-gray-100 border-b">
@@ -1775,11 +2494,17 @@ const ProfilePage: React.FC = () => {
 	const [newPassword, setNewPassword] = useState("");
 	const [confirmPassword, setConfirmPassword] = useState("");
 	const [oldPassword, setOldPassword] = useState("");
+	const [analytics, setAnalytics] = useState<any | null>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const navigate = useNavigate();
 
 	useEffect(() => {
 		if (user) setFormData(user);
+	}, [user]);
+
+	useEffect(() => {
+		if (!user) return;
+		api.get<any>("/analytics/dashboard").then(setAnalytics).catch(() => setAnalytics(null));
 	}, [user]);
 
 	const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1864,7 +2589,7 @@ const ProfilePage: React.FC = () => {
 			<h1 className="text-3xl font-bold text-gray-800 mb-6">
 				{t("profile.title")}
 			</h1>
-			<div className="bg-white rounded-lg shadow-lg p-8">
+			<div className={`${ds.surface} p-8`}>
 				<div className="flex items-center gap-6 mb-8 border-b pb-6 relative group">
 					<div className="relative w-24 h-24 rounded-full border-4 border-gray-100 shadow-sm overflow-hidden group/img">
 						<img
@@ -1915,6 +2640,26 @@ const ProfilePage: React.FC = () => {
 						onChange={handleImageUpload}
 					/>
 				</div>
+				{analytics && (
+					<div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+						<div className="md-surface p-3">
+							<p className="text-xs text-blue-600 font-bold uppercase">My Books</p>
+							<p className="text-xl font-bold text-gray-800">{analytics.myBooks ?? 0}</p>
+						</div>
+						<div className="md-surface p-3">
+							<p className="text-xs text-pink-600 font-bold uppercase">Favorites</p>
+							<p className="text-xl font-bold text-gray-800">{analytics.myFavorites ?? 0}</p>
+						</div>
+						<div className="md-surface p-3">
+							<p className="text-xs text-emerald-600 font-bold uppercase">Completed Swaps</p>
+							<p className="text-xl font-bold text-gray-800">{analytics.mySwaps?.completed ?? 0}</p>
+						</div>
+						<div className="md-surface p-3">
+							<p className="text-xs text-yellow-700 font-bold uppercase">Active Chats</p>
+							<p className="text-xl font-bold text-gray-800">{analytics.myChats ?? 0}</p>
+						</div>
+					</div>
+				)}
 				<form onSubmit={handleUpdate} className="space-y-6">
 					<div>
 						<h3 className="text-lg font-semibold text-gray-700 mb-4 border-l-4 border-secondary pl-3">
@@ -1929,7 +2674,7 @@ const ProfilePage: React.FC = () => {
 									name="firstName"
 									value={formData.firstName}
 									onChange={handleChange}
-									className="w-full p-2 border rounded focus:ring-secondary focus:border-secondary"
+									className={`${ds.input} w-full p-2`}
 									required
 								/>
 							</div>
@@ -1941,7 +2686,7 @@ const ProfilePage: React.FC = () => {
 									name="lastName"
 									value={formData.lastName}
 									onChange={handleChange}
-									className="w-full p-2 border rounded focus:ring-secondary focus:border-secondary"
+									className={`${ds.input} w-full p-2`}
 									required
 								/>
 							</div>
@@ -1954,7 +2699,7 @@ const ProfilePage: React.FC = () => {
 									name="email"
 									value={formData.email}
 									onChange={handleChange}
-									className="w-full p-2 border rounded focus:ring-secondary focus:border-secondary"
+									className={`${ds.input} w-full p-2`}
 								/>
 							</div>
 							<div>
@@ -1966,7 +2711,7 @@ const ProfilePage: React.FC = () => {
 									name="phone"
 									value={formData.phone}
 									onChange={handleChange}
-									className="w-full p-2 border rounded focus:ring-secondary focus:border-secondary"
+									className={`${ds.input} w-full p-2`}
 								/>
 							</div>
 						</div>
@@ -2032,8 +2777,12 @@ const ProfilePage: React.FC = () => {
 
 // ... PublicProfilePage ...
 // (Kept as is)
-const PublicProfilePage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
+const PublicProfilePage: React.FC<{
+	onViewDetails: (book: Book) => void;
+	onOpenAddBook?: () => void;
+}> = ({
 	onViewDetails,
+	onOpenAddBook,
 }) => {
 	// ... (PublicProfilePage content unchanged)
 	const { userId } = useParams<{ userId: string }>();
@@ -2042,6 +2791,8 @@ const PublicProfilePage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 	const [reviews, setReviews] = useState<Review[]>([]);
 	const [newRating, setNewRating] = useState(5);
 	const [newComment, setNewComment] = useState("");
+	const [trustScore, setTrustScore] = useState<number | null>(null);
+	const [ownBooksTab, setOwnBooksTab] = useState<"listings" | "books">("listings");
 	const { t } = useLanguage();
 	const { user } = useAuth();
 
@@ -2075,6 +2826,13 @@ const PublicProfilePage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 		fetchProfileData();
 	}, [userId]);
 
+	useEffect(() => {
+		if (!userId) return;
+		api.get<{ score: number }>(`/users/${userId}/trust-score`)
+			.then((data) => setTrustScore(data.score))
+			.catch(() => setTrustScore(null));
+	}, [userId]);
+
 	const handleSubmitReview = async (e: React.FormEvent) => {
 		e.preventDefault();
 		if (!newComment.trim()) return;
@@ -2095,11 +2853,19 @@ const PublicProfilePage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 	if (!profileUser)
 		return <div className="text-center p-8">Loading profile...</div>;
 	const isOwnProfile = String(user?.id) === String(userId);
+	const isMarketplaceOwnerProfile = isOwnProfile && profileUser.role === UserRole.USER;
+	const ownListings = userBooks.filter((b) => b.forSale || b.forSwap);
+	const ownInventory = userBooks.filter((b) => !b.forSale && !b.forSwap);
+	const visibleBooks = isMarketplaceOwnerProfile
+		? ownBooksTab === "listings"
+			? ownListings
+			: ownInventory
+		: userBooks;
 
 	return (
 		<div className="container mx-auto p-4 max-w-6xl">
 			{/* New Modern Profile Header Design */}
-			<div className="bg-white rounded-2xl shadow-xl overflow-hidden mb-8 border border-gray-100">
+			<div className="md-surface rounded-2xl overflow-hidden mb-8">
 				{/* Banner Section */}
 				<div className="h-48 bg-gradient-to-r from-blue-600 via-blue-500 to-cyan-400 relative">
 					<div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')]"></div>
@@ -2154,6 +2920,10 @@ const PublicProfilePage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 
 								{/* Action Buttons / Stats */}
 								<div className="flex flex-col sm:flex-row gap-3 items-center justify-center md:justify-end">
+									<div className="flex flex-col items-center px-4 py-1 bg-blue-50 rounded-lg border border-blue-100">
+										<span className="text-[10px] text-blue-600 font-bold uppercase">Trust Score</span>
+										<span className="text-xl font-bold text-blue-700">{trustScore ?? 0}/100</span>
+									</div>
 									<div className="flex flex-col items-center px-4 py-1 bg-yellow-50 rounded-lg border border-yellow-100">
 										<div className="flex items-center gap-1 text-yellow-500">
 											<span className="text-xl font-bold text-gray-800">
@@ -2176,7 +2946,7 @@ const PublicProfilePage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 				{/* Left Column: Reviews & Forms */}
 				<div className="lg:col-span-1 space-y-6 order-2 lg:order-1">
 					{!isOwnProfile && user && (
-						<div className="bg-white p-5 rounded-xl shadow-md border border-gray-100">
+						<div className="md-surface p-5 rounded-xl">
 							<h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2">
 								<PencilIcon className="w-5 h-5 text-primary" />
 								{t("profile.add_review")}
@@ -2220,7 +2990,7 @@ const PublicProfilePage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 						</div>
 					)}
 
-					<div className="bg-white p-5 rounded-xl shadow-md border border-gray-100">
+					<div className="md-surface p-5 rounded-xl">
 						<h3 className="font-bold text-gray-800 mb-4 border-b pb-3 flex justify-between items-center">
 							<span>{t("profile.reviews")}</span>
 							<span className="text-xs bg-gray-100 px-2 py-1 rounded-full text-gray-600 font-medium">
@@ -2279,39 +3049,85 @@ const PublicProfilePage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 
 				{/* Right Column: Listings */}
 				<div className="lg:col-span-2 order-1 lg:order-2">
-					<div className="flex items-center justify-between mb-6">
-						<h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-							<BookOpenIcon className="w-6 h-6 text-primary" />
-							{t("profile.public.listings").replace(
-								"{name}",
-								profileUser.firstName,
-							)}
-						</h2>
-						<span className="text-sm font-medium text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm border">
-							{userBooks.length} Books
-						</span>
-					</div>
-
-					{userBooks.length === 0 ? (
-						<div className="text-center py-16 bg-white rounded-xl shadow-sm border-2 border-dashed border-gray-200">
-							<BookOpenIcon className="w-16 h-16 mx-auto text-gray-200 mb-4" />
-							<p className="text-gray-500 font-medium text-lg">
-								{t("profile.public.empty")}
-							</p>
-							<p className="text-gray-400 text-sm mt-1">
-								Check back later for new listings.
+					{isOwnProfile && profileUser.role !== UserRole.USER ? (
+						<div className="bg-blue-50 border border-blue-200 rounded-xl p-6">
+							<h3 className="text-lg font-bold text-blue-900 mb-1">Admin account</h3>
+							<p className="text-sm text-blue-700">
+								Admin profiles are read-only for marketplace actions. Listings, offers, and book inventory are only available for student user accounts.
 							</p>
 						</div>
 					) : (
-						<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-							{userBooks.map((book) => (
-								<BookCard
-									key={book.id}
-									book={book}
-									onViewDetails={onViewDetails}
-								/>
-							))}
-						</div>
+						<>
+							<div className="flex items-center justify-between mb-6">
+								<h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+									<BookOpenIcon className="w-6 h-6 text-primary" />
+									{isMarketplaceOwnerProfile
+										? ownBooksTab === "listings"
+											? "My Listings"
+											: "My Books"
+										: t("profile.public.listings").replace(
+												"{name}",
+												profileUser.firstName,
+											)}
+								</h2>
+								<span className="text-sm font-medium text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm border">
+									{visibleBooks.length} Books
+								</span>
+							</div>
+							{isMarketplaceOwnerProfile && (
+								<div className="mb-4 flex gap-2">
+									<button
+										onClick={() => setOwnBooksTab("listings")}
+										className={`px-3 py-2 rounded-lg text-sm font-semibold ${ownBooksTab === "listings" ? "bg-primary text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"}`}
+									>
+										My Listings ({ownListings.length})
+									</button>
+									<button
+										onClick={() => setOwnBooksTab("books")}
+										className={`px-3 py-2 rounded-lg text-sm font-semibold ${ownBooksTab === "books" ? "bg-primary text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"}`}
+									>
+										My Books ({ownInventory.length})
+									</button>
+									<button
+										type="button"
+										onClick={() => onOpenAddBook?.()}
+										className="ml-auto px-3 py-2 rounded-lg text-sm font-semibold bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+									>
+										Add Book
+									</button>
+								</div>
+							)}
+
+							{visibleBooks.length === 0 ? (
+								<div className="text-center py-16 bg-white rounded-xl shadow-sm border-2 border-dashed border-gray-200">
+									<BookOpenIcon className="w-16 h-16 mx-auto text-gray-200 mb-4" />
+									<p className="text-gray-500 font-medium text-lg">
+										{isMarketplaceOwnerProfile
+											? ownBooksTab === "listings"
+												? "You do not have active listings yet."
+												: "You do not have books in inventory yet."
+											: t("profile.public.empty")}
+									</p>
+									<p className="text-gray-400 text-sm mt-1">
+										{isMarketplaceOwnerProfile
+											? ownBooksTab === "listings"
+												? "Use Add Book to create a listing."
+												: "Complete swaps or add books to build inventory."
+											: "Check back later for new listings."}
+									</p>
+								</div>
+							) : (
+								<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+									{visibleBooks.map((book) => (
+										<BookCard
+											key={book.id}
+											book={book}
+											onViewDetails={onViewDetails}
+										/>
+									))}
+								</div>
+							)}
+						</>
 					)}
 				</div>
 			</div>
@@ -2331,13 +3147,69 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 	const [maxPrice, setMaxPrice] = useState("");
 	const [sortOption, setSortOption] = useState("date_desc");
 	const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+	const [forSwapOnly, setForSwapOnly] = useState(false);
+	const [forSaleOnly, setForSaleOnly] = useState(false);
+	const [listedWithin, setListedWithin] = useState<
+		"all" | "today" | "week" | "month"
+	>("all");
 
 	const { t } = useLanguage();
 	const { user } = useAuth();
 
 	useEffect(() => {
-		api.get<Book[]>("/books").then(setBooks).catch(console.error);
+		const raw = localStorage.getItem("browseFilters");
+		if (!raw) return;
+		try {
+			const parsed = JSON.parse(raw);
+			setSearchTerm(parsed.searchTerm || "");
+			setConditionFilter(parsed.conditionFilter || "");
+			setDepartmentFilter(parsed.departmentFilter || "");
+			setMinPrice(parsed.minPrice || "");
+			setMaxPrice(parsed.maxPrice || "");
+			setSortOption(parsed.sortOption || "date_desc");
+			setForSwapOnly(!!parsed.forSwapOnly);
+			setForSaleOnly(!!parsed.forSaleOnly);
+			setListedWithin(parsed.listedWithin || "all");
+		} catch {}
 	}, []);
+
+	useEffect(() => {
+		const sortMap: Record<string, string> = {
+			date_desc: "newest",
+			price_asc: "price_asc",
+			price_desc: "price_desc",
+		};
+		const params = new URLSearchParams();
+		if (searchTerm) params.set("q", searchTerm);
+		if (conditionFilter) params.set("condition", conditionFilter);
+		if (departmentFilter) params.set("department", departmentFilter);
+		if (minPrice) params.set("minPrice", minPrice);
+		if (maxPrice) params.set("maxPrice", maxPrice);
+		if (forSwapOnly) params.set("forSwap", "true");
+		if (forSaleOnly) params.set("forSale", "true");
+		params.set("sort", sortMap[sortOption] || "newest");
+		api.get<Book[]>(`/books/search?${params.toString()}`)
+			.then(setBooks)
+			.catch(console.error);
+	}, [searchTerm, conditionFilter, departmentFilter, minPrice, maxPrice, sortOption, forSwapOnly, forSaleOnly]);
+
+	const saveCurrentFilters = () => {
+		localStorage.setItem(
+			"browseFilters",
+			JSON.stringify({
+				searchTerm,
+				conditionFilter,
+				departmentFilter,
+				minPrice,
+				maxPrice,
+				sortOption,
+				forSwapOnly,
+				forSaleOnly,
+				listedWithin,
+			}),
+		);
+		alert("Filters saved.");
+	};
 
 	const handleFavoriteToggle = async (bookId: string) => {
 		if (!user) return;
@@ -2364,36 +3236,25 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 	};
 
 	const filteredBooks = books.filter((b) => {
-		const matchesSearch =
-			b.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-			b.author.toLowerCase().includes(searchTerm.toLowerCase()) ||
-			(b.isbn && b.isbn.includes(searchTerm));
-		const matchesCondition = conditionFilter
-			? b.condition === conditionFilter
-			: true;
-		const matchesDepartment = departmentFilter
-			? b.department === departmentFilter
-			: true;
-		const price = b.price || 0;
-		const matchesMinPrice = minPrice ? price >= Number(minPrice) : true;
-		const matchesMaxPrice = maxPrice ? price <= Number(maxPrice) : true;
 		const isNotMine = user ? String(b.ownerId) !== String(user.id) : true;
 		const isActive =
 			b.status !== BookStatus.SWAPPED &&
 			b.status !== BookStatus.SOLD &&
 			b.status !== BookStatus.ARCHIVED;
 		const matchesFavorites = showFavoritesOnly ? b.isFavorited : true;
+		const listedAt = new Date(b.listedDate).getTime();
+		const now = Date.now();
+		const dayMs = 24 * 60 * 60 * 1000;
+		const matchesListedWindow =
+			listedWithin === "all"
+				? true
+				: listedWithin === "today"
+					? now - listedAt <= dayMs
+					: listedWithin === "week"
+						? now - listedAt <= 7 * dayMs
+						: now - listedAt <= 30 * dayMs;
 
-		return (
-			matchesSearch &&
-			matchesCondition &&
-			matchesDepartment &&
-			matchesMinPrice &&
-			matchesMaxPrice &&
-			isNotMine &&
-			isActive &&
-			matchesFavorites
-		);
+		return isNotMine && isActive && matchesFavorites && matchesListedWindow;
 	});
 
 	const sortedBooks = [...filteredBooks].sort((a, b) => {
@@ -2423,29 +3284,36 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 		setMaxPrice("");
 		setSortOption("date_desc");
 		setShowFavoritesOnly(false);
+		setForSwapOnly(false);
+		setForSaleOnly(false);
+		setListedWithin("all");
 	};
 
 	return (
-		<div className="container mx-auto p-4">
-			<div className="mb-6 bg-white p-4 rounded-lg shadow">
+		<div className="container mx-auto p-4 max-w-6xl">
+			<div className="flex justify-between items-center mb-4">
+				<h2 className="text-2xl font-bold text-gray-800">Current Listings</h2>
+				<div className="text-sm text-gray-500">{sortedBooks.length} books</div>
+			</div>
+			<div className={`${ds.panel} mb-6 p-4`}>
 				<div className="flex flex-col md:flex-row gap-4 mb-4">
 					<div className="flex-1 relative">
 						<MagnifyingGlassIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
 						<input
 							type="text"
 							placeholder={t("browse.search_placeholder")}
-							className="w-full pl-10 p-2 border rounded"
+							className={`${ds.input} w-full pl-10 p-2`}
 							value={searchTerm}
 							onChange={(e) => setSearchTerm(e.target.value)}
 						/>
 					</div>
 					<div className="flex flex-col sm:flex-row gap-2">
 						<select
-							className="p-2 border rounded"
+							className={`${ds.input} p-2`}
 							value={departmentFilter}
 							onChange={(e) => setDepartmentFilter(e.target.value)}
 						>
-							<option value="">{t("browse.all_departments")}</option>
+							<option value="">All Genres</option>
 							{DEPARTMENTS.map((d) => (
 								<option key={d} value={d}>
 									{t(getDeptKey(d))}
@@ -2453,7 +3321,7 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 							))}
 						</select>
 						<select
-							className="p-2 border rounded"
+							className={`${ds.input} p-2`}
 							value={conditionFilter}
 							onChange={(e) => setConditionFilter(e.target.value)}
 						>
@@ -2471,7 +3339,7 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 						<input
 							type="number"
 							placeholder={t("browse.filter_price_min")}
-							className="w-24 p-2 border rounded"
+							className={`${ds.input} w-24 p-2`}
 							value={minPrice}
 							onChange={(e) => setMinPrice(e.target.value)}
 						/>
@@ -2479,12 +3347,12 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 						<input
 							type="number"
 							placeholder={t("browse.filter_price_max")}
-							className="w-24 p-2 border rounded"
+							className={`${ds.input} w-24 p-2`}
 							value={maxPrice}
 							onChange={(e) => setMaxPrice(e.target.value)}
 						/>
 						{user && (
-							<label className="flex items-center gap-2 cursor-pointer select-none bg-gray-50 px-3 py-2 rounded border border-gray-200 hover:bg-gray-100 ml-2">
+							<label className={`${ds.chip} cursor-pointer select-none ml-2`}>
 								<input
 									type="checkbox"
 									checked={showFavoritesOnly}
@@ -2499,13 +3367,31 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 								</span>
 							</label>
 						)}
+						<label className={`${ds.chip} cursor-pointer select-none`}>
+							<input
+								type="checkbox"
+								checked={forSwapOnly}
+								onChange={(e) => setForSwapOnly(e.target.checked)}
+								className="rounded text-primary focus:ring-primary"
+							/>
+							<span className="text-sm font-medium text-gray-700">For Swap</span>
+						</label>
+						<label className={`${ds.chip} cursor-pointer select-none`}>
+							<input
+								type="checkbox"
+								checked={forSaleOnly}
+								onChange={(e) => setForSaleOnly(e.target.checked)}
+								className="rounded text-primary focus:ring-primary"
+							/>
+							<span className="text-sm font-medium text-gray-700">For Sale</span>
+						</label>
 					</div>
 					<div className="flex gap-2 items-center w-full sm:w-auto justify-between sm:justify-end">
 						<span className="text-sm font-bold text-gray-600 whitespace-nowrap">
 							{t("browse.sort_by")}:
 						</span>
 						<select
-							className="p-2 border rounded w-full sm:w-auto"
+							className={`${ds.input} p-2 w-full sm:w-auto`}
 							value={sortOption}
 							onChange={(e) => setSortOption(e.target.value)}
 						>
@@ -2514,9 +3400,30 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 							<option value="price_asc">{t("browse.sort_price_low")}</option>
 							<option value="price_desc">{t("browse.sort_price_high")}</option>
 						</select>
+						<select
+							className={`${ds.input} p-2 w-full sm:w-auto`}
+							value={listedWithin}
+							onChange={(e) =>
+								setListedWithin(
+									e.target.value as "all" | "today" | "week" | "month",
+								)
+							}
+							title="Filter by listed date range"
+						>
+							<option value="all">Listed: Anytime</option>
+							<option value="today">Listed: Today</option>
+							<option value="week">Listed: This Week</option>
+							<option value="month">Listed: This Month</option>
+						</select>
+						<button
+							onClick={saveCurrentFilters}
+							className={`${ds.btnSecondary} whitespace-nowrap px-4 py-2 text-sm`}
+						>
+							Save preset
+						</button>
 						<button
 							onClick={clearFilters}
-							className="text-sm text-red-500 hover:underline flex items-center gap-1 whitespace-nowrap"
+							className={`${ds.btnDanger} flex items-center gap-1 whitespace-nowrap px-4 py-2 text-sm`}
 						>
 							<ArrowPathRoundedSquareIcon className="w-4 h-4" />{" "}
 							{t("browse.clear_filters")}
@@ -2535,13 +3442,20 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 				</div>
 			) : (
 				<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-					{sortedBooks.map((book) => (
-						<BookCard
-							key={book.id}
-							book={book}
-							onViewDetails={onViewDetails}
-							onFavoriteToggle={handleFavoriteToggle}
-						/>
+					{sortedBooks.map((book, index) => (
+						<div
+							key={`${book.id}-${sortOption}-${listedWithin}-${forSwapOnly}-${forSaleOnly}-${conditionFilter}-${departmentFilter}`}
+							className="book-card-wrap"
+							style={{
+								animationDelay: `${Math.min(index * 55, 420)}ms`,
+							}}
+						>
+							<BookCard
+								book={book}
+								onViewDetails={onViewDetails}
+								onFavoriteToggle={handleFavoriteToggle}
+							/>
+						</div>
 					))}
 				</div>
 			)}
@@ -2553,11 +3467,12 @@ const BrowseBooksPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 const MyBooksPage: React.FC<{
 	onViewDetails: (book: Book) => void;
 	onEditBook: (book: Book) => void;
-}> = ({ onViewDetails, onEditBook }) => {
+	onAddBook?: () => void;
+}> = ({ onViewDetails, onEditBook, onAddBook }) => {
 	const [myBooks, setMyBooks] = useState<Book[]>([]);
 	const { user } = useAuth();
+	const isMarketplaceUser = user?.role === 'user';
 	const { t } = useLanguage();
-	const navigate = useNavigate();
 
 	const fetchMyBooks = () => {
 		if (user) {
@@ -2573,7 +3488,7 @@ const MyBooksPage: React.FC<{
 
 	const handleDelete = async (e: React.MouseEvent, bookId: string) => {
 		e.stopPropagation();
-		if (!window.confirm('Are you sure you want to delete this book?')) return;
+		if (!window.confirm('Delete permanently? This will remove the book from your account.')) return;
 		try {
 			await api.delete(`/books/${bookId}`);
 			setMyBooks((prev) => prev.filter((b) => b.id !== bookId));
@@ -2584,7 +3499,7 @@ const MyBooksPage: React.FC<{
 
 	const handleUnlist = async (e: React.MouseEvent, book: Book) => {
 		e.stopPropagation();
-		if (!window.confirm(t('Are you sure you want to unlist this book?') || 'Unlist this book?')) return;
+		if (!window.confirm('Unlist this book? It will be moved back to My Books.')) return;
 		try {
 			await api.put(`/books/${book.id}`, {
 				...book,
@@ -2602,7 +3517,6 @@ const MyBooksPage: React.FC<{
 	const handleListOnMarketplace = (e: React.MouseEvent, book: Book) => {
 		e.stopPropagation();
 		onEditBook(book);
-		navigate('/edit-book');
 	};
 
 	const listings = myBooks.filter((b) => b.forSwap || b.forSale);
@@ -2612,19 +3526,22 @@ const MyBooksPage: React.FC<{
 		<div className="container mx-auto p-4">
 			<div className="flex justify-between items-center mb-6">
 				<h2 className="text-2xl font-bold text-gray-800">{t('my_books.title')}</h2>
-				<Link
-					to="/add-book"
-					className="bg-primary text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-600 transition shadow-sm"
-				>
-					<PlusCircleIcon className="w-5 h-5" /> {t('my_books.add_new')}
-				</Link>
+				{isMarketplaceUser && (
+					<button
+						type="button"
+						onClick={() => onAddBook?.()}
+						className="bg-primary text-white px-4 py-2 rounded flex items-center gap-2 hover:bg-blue-600 transition shadow-sm"
+					>
+						<PlusCircleIcon className="w-5 h-5" /> {t('my_books.add_new')}
+					</button>
+				)}
 			</div>
 
 			{/* Listed on Marketplace */}
 			<section className="mb-8">
 				<h3 className="text-xl font-semibold mb-4">{t('my_listings.title')}</h3>
 				{listings.length === 0 ? (
-					<div className="text-center py-6 bg-white rounded-lg shadow-sm border border-dashed border-gray-300">
+					<div className="text-center py-6 md-surface border-dashed border-gray-300">
 						<BookOpenIcon className="w-12 h-12 mx-auto text-gray-300 mb-3" />
 						<p className="text-gray-500 text-lg">{t('my_listings.empty')}</p>
 					</div>
@@ -2638,17 +3555,16 @@ const MyBooksPage: React.FC<{
 										onClick={(e) => {
 											e.stopPropagation();
 											onEditBook(book);
-											navigate('/edit-book');
 										}}
-										className="bg-white text-blue-600 p-1.5 rounded-full shadow hover:bg-blue-50"
+										className="bg-white text-blue-600 p-1.5 rounded-full shadow hover:bg-blue-50 hover:-translate-y-0.5"
 										title={t('btn.edit')}
 									>
 										<PencilIcon className="w-4 h-4" />
 									</button>
 									<button
 										onClick={(e) => handleUnlist(e, book)}
-										className="bg-white text-yellow-600 p-1.5 rounded-full shadow hover:bg-yellow-50"
-										title="Unlist"
+										className="bg-white text-yellow-600 p-1.5 rounded-full shadow hover:bg-yellow-50 hover:-translate-y-0.5"
+										title="Unlist (move to My Books)"
 									>
 										<TrashIcon className="w-4 h-4" />
 									</button>
@@ -2663,12 +3579,18 @@ const MyBooksPage: React.FC<{
 			<section>
 				<h3 className="text-xl font-semibold mb-4">{t('my_books.owned')}</h3>
 				{inventory.length === 0 ? (
-					<div className="text-center py-6 bg-white rounded-lg shadow-sm border border-dashed border-gray-300">
+					<div className="text-center py-6 md-surface border-dashed border-gray-300">
 						<BookOpenIcon className="w-12 h-12 mx-auto text-gray-300 mb-3" />
 						<p className="text-gray-500 text-lg">{t('my_books.empty')}</p>
-						<Link to="/add-book" className="text-primary font-medium hover:underline mt-2 inline-block">
-							{t('my_books.list_first')}
-						</Link>
+						{isMarketplaceUser && (
+							<button
+								type="button"
+								onClick={() => onAddBook?.()}
+								className="text-primary font-medium hover:underline mt-2 inline-block"
+							>
+								{t('my_books.list_first')}
+							</button>
+						)}
 					</div>
 				) : (
 					<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
@@ -2680,24 +3602,23 @@ const MyBooksPage: React.FC<{
 										onClick={(e) => {
 											e.stopPropagation();
 											onEditBook(book);
-											navigate('/edit-book');
 										}}
-										className="bg-white text-blue-600 p-1.5 rounded-full shadow hover:bg-blue-50"
+										className="bg-white text-blue-600 p-1.5 rounded-full shadow hover:bg-blue-50 hover:-translate-y-0.5"
 										title={t('btn.edit')}
 									>
 										<PencilIcon className="w-4 h-4" />
 									</button>
 									<button
 										onClick={(e) => handleListOnMarketplace(e, book)}
-										className="bg-white text-green-600 p-1.5 rounded-full shadow hover:bg-green-50"
+										className="bg-white text-green-600 p-1.5 rounded-full shadow hover:bg-green-50 hover:-translate-y-0.5"
 										title={t('btn.list_on_marketplace')}
 									>
 										<PlusCircleIcon className="w-4 h-4" />
 									</button>
 									<button
 										onClick={(e) => handleDelete(e, book.id)}
-										className="bg-white text-red-600 p-1.5 rounded-full shadow hover:bg-red-50"
-										title={t('btn.delete')}
+										className="bg-white text-red-600 p-1.5 rounded-full shadow hover:bg-red-50 hover:-translate-y-0.5"
+										title="Delete Permanently"
 									>
 										<TrashIcon className="w-4 h-4" />
 									</button>
@@ -2714,9 +3635,11 @@ const MyBooksPage: React.FC<{
 
 
 // ... AddEditBookForm ...
-const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
-	initialBook,
-}) => {
+const AddEditBookForm: React.FC<{
+	initialBook?: Book | null;
+	onDone?: () => void;
+	onCancel?: () => void;
+}> = ({ initialBook, onDone, onCancel }) => {
 	// ... (AddEditBookForm content unchanged)
 	const { user } = useAuth();
 	const navigate = useNavigate();
@@ -2806,7 +3729,8 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 			// Race between the API call and the timeout
 			await Promise.race([apiCall, timeoutPromise]);
 
-			navigate("/my-books");
+			if (onDone) onDone();
+			else navigate(`/user/${user?.id}`);
 		} catch (err: any) {
 			console.error("Save error:", err);
 			alert("Error saving book: " + (err.message || "Unknown error"));
@@ -2818,17 +3742,14 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 	const optionalText = language === "tr" ? "(Opsiyonel)" : "(Optional)";
 
 	return (
-		<div className="container mx-auto p-4 max-w-2xl">
-			<h2 className="text-2xl font-bold mb-6 text-gray-800">
-				{initialBook ? t("btn.edit") : t("my_books.add_new")}
-			</h2>
+		<div className="max-w-2xl">
 			<form
 				onSubmit={handleSubmit}
-				className="bg-white p-6 rounded-lg shadow space-y-4"
+				className="md-surface p-4 space-y-3"
 			>
-				<div className="flex justify-center mb-4">
+				<div className="flex justify-center mb-2">
 					<div
-						className={`w-32 h-40 border-2 border-dashed border-gray-300 rounded-lg flex items-center justify-center cursor-pointer hover:bg-gray-50 relative overflow-hidden ${!formData.imageUrl ? "bg-red-50 border-red-200" : ""}`}
+						className={`w-28 h-36 border-2 border-dashed border-gray-300 rounded-lg flex items-center justify-center cursor-pointer hover:bg-gray-50 relative overflow-hidden ${!formData.imageUrl ? "bg-red-50 border-red-200" : ""}`}
 						onClick={() => fileInputRef.current?.click()}
 					>
 						{formData.imageUrl ? (
@@ -2854,7 +3775,7 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 						/>
 					</div>
 				</div>
-				<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+				<div className="grid grid-cols-1 md:grid-cols-2 gap-3">
 					<div>
 						<label className="block text-sm font-medium text-gray-700">
 							{t("book.title")} *
@@ -2942,7 +3863,7 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 					</div>
 					<div>
 						<label className="block text-sm font-medium text-gray-700">
-							{t("book.department")}{" "}
+							Genre{" "}
 							<span className="text-gray-400 text-xs">{optionalText}</span>
 						</label>
 						<select
@@ -2952,7 +3873,7 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 								setFormData({ ...formData, department: e.target.value })
 							}
 						>
-							<option value="">{t("browse.all_departments")}</option>
+							<option value="">All Genres</option>
 							{DEPARTMENTS.map((d) => (
 								<option key={d} value={d}>
 									{t(getDeptKey(d))}
@@ -2974,8 +3895,8 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 						}
 					/>
 				</div>
-				<div className="flex flex-col sm:flex-row gap-4 p-4 bg-gray-50 rounded border border-gray-100">
-					<div className="flex items-center gap-2">
+				<div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 bg-slate-50 rounded border border-slate-200">
+					<label htmlFor="forSwap" className={`${ds.chip} cursor-pointer`}>
 						<input
 							type="checkbox"
 							id="forSwap"
@@ -2985,55 +3906,52 @@ const AddEditBookForm: React.FC<{ initialBook?: Book | null }> = ({
 							}
 							className="w-4 h-4 text-secondary rounded focus:ring-secondary"
 						/>
-						<label
-							htmlFor="forSwap"
-							className="text-sm font-medium text-gray-700"
-						>
+						<span className="text-sm font-medium text-gray-700">
 							{t("book.for_swap")}
-						</label>
-					</div>
-					<div className="flex items-center gap-4">
-						<div className="flex items-center gap-2">
+						</span>
+					</label>
+					<label htmlFor="forSale" className={`${ds.chip} cursor-pointer`}>
+						<input
+							type="checkbox"
+							id="forSale"
+							checked={formData.forSale}
+							onChange={(e) =>
+								setFormData({
+									...formData,
+									forSale: e.target.checked,
+									price: e.target.checked ? formData.price : undefined,
+								})
+							}
+							className="w-4 h-4 text-primary rounded focus:ring-primary"
+						/>
+						<span className="text-sm font-medium text-gray-700">
+							{t("book.for_sale")}
+						</span>
+					</label>
+					{formData.forSale && (
+						<div className="flex items-center gap-2 sm:ml-auto">
 							<input
-								type="checkbox"
-								id="forSale"
-								checked={formData.forSale}
+								type="number"
+								min={1}
+								placeholder="Price"
+								className={`${ds.input} w-24 p-1.5 text-sm`}
+								value={formData.price ?? ""}
 								onChange={(e) =>
-									setFormData({ ...formData, forSale: e.target.checked })
+									setFormData({
+										...formData,
+										price: e.target.value === "" ? undefined : Number(e.target.value),
+									})
 								}
-								className="w-4 h-4 text-primary rounded focus:ring-primary"
 							/>
-							<label
-								htmlFor="forSale"
-								className="text-sm font-medium text-gray-700"
-							>
-								{t("book.for_sale")}
-							</label>
+							<span className="text-sm text-gray-500">TL</span>
 						</div>
-						{formData.forSale && (
-							<div className="flex items-center gap-2">
-								<input
-									type="number"
-									placeholder="Price"
-									className="w-24 border p-1 rounded text-sm"
-									value={formData.price ?? ""}
-									onChange={(e) =>
-										setFormData({
-											...formData,
-											price: e.target.value === "" ? undefined : Number(e.target.value),
-										})
-									}
-								/>
-								<span className="text-sm text-gray-500">TL</span>
-							</div>
-						)}
-					</div>
+					)}
 				</div>
 				<div className="flex justify-end pt-4">
 					<button
 						type="button"
-						onClick={() => navigate("/my-books")}
-						className="mr-3 px-4 py-2 text-gray-600 hover:text-gray-800"
+						onClick={() => (onCancel ? onCancel() : navigate(`/user/${user?.id}`))}
+						className={`${ds.btnSecondary} mr-3 px-4 py-2`}
 						disabled={isSubmitting}
 					>
 						{t("btn.cancel")}
@@ -3126,6 +4044,24 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 		}
 	};
 
+	const handleCounterOffer = async (swap: SwapOffer) => {
+		const offeredBookId = window.prompt("Enter your counter offered book ID", swap.offeredBookIds?.[0] || "");
+		const requestedBookId = window.prompt("Enter requested book ID", swap.requestedBookId || "");
+		const message = window.prompt("Counter offer message", "Would you accept this instead?");
+		if (!offeredBookId || !requestedBookId) return;
+		try {
+			await api.post(`/swaps/${swap.id}/counter`, {
+				offeredBookIds: [offeredBookId],
+				requestedBookId,
+				message: message || ""
+			});
+			alert("Counter offer sent");
+			fetchData();
+		} catch (e: any) {
+			alert("Counter offer failed: " + (e.message || e));
+		}
+	};
+
 	const handleUserClick = (e: React.MouseEvent, userId: string) => {
 		e.stopPropagation();
 		navigate(`/user/${userId}`);
@@ -3134,6 +4070,23 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 	const handleBookClick = (book: Book | undefined) => {
 		if (book && onViewDetails) {
 			onViewDetails(book);
+		}
+	};
+
+	const handleChatForSwap = async (swap: SwapOffer) => {
+		try {
+			const targetUserId =
+				String(swap.offeredById) === String(user?.id)
+					? swap.offeredToId
+					: swap.offeredById;
+			const chat = await api.post<{ id: string }>("/chats", {
+				targetUserId,
+				bookId: swap.requestedBookId,
+				language,
+			});
+			navigate(`/messages/${chat.id}`);
+		} catch (e: any) {
+			alert("Failed to open chat: " + (e.message || e));
 		}
 	};
 
@@ -3151,6 +4104,37 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 				new Date(b.lastUpdateDate).getTime() -
 				new Date(a.lastUpdateDate).getTime(),
 		);
+	const isActiveStatus = (status: SwapStatus) =>
+		status === SwapStatus.PENDING || status === SwapStatus.ACCEPTED;
+	const incomingActive = incoming.filter((s) => isActiveStatus(s.status));
+	const outgoingActive = outgoing.filter((s) => isActiveStatus(s.status));
+	const completedOffers = swaps
+		.filter((s) => !isActiveStatus(s.status))
+		.sort(
+			(a, b) =>
+				new Date(b.lastUpdateDate).getTime() -
+				new Date(a.lastUpdateDate).getTime(),
+		);
+
+	const incomingPending = incomingActive.filter((s) => s.status === SwapStatus.PENDING);
+	const groupedIncomingMap: Record<string, SwapOffer[]> = incomingPending.reduce(
+		(acc, s) => {
+			if (!acc[s.requestedBookId]) acc[s.requestedBookId] = [];
+			acc[s.requestedBookId].push(s);
+			return acc;
+		},
+		{} as Record<string, SwapOffer[]>,
+	);
+	const groupedIncoming = Object.keys(groupedIncomingMap)
+		.map((requestedBookId) => ({
+			requestedBookId,
+			offers: groupedIncomingMap[requestedBookId],
+		}))
+		.filter((g) => g.offers.length > 1);
+	const groupedIncomingIds = new Set(
+		groupedIncoming.flatMap((g) => g.offers.map((o) => o.id)),
+	);
+	const incomingUngrouped = incomingActive.filter((s) => !groupedIncomingIds.has(s.id));
 
 	const renderSwapCard = (swap: SwapOffer, isIncoming: boolean) => {
 		const myBook = isIncoming
@@ -3159,6 +4143,23 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 		const otherBook = isIncoming
 			? booksMap[swap.offeredBookIds[0]]
 			: booksMap[swap.requestedBookId];
+		const historyEntries = (swap.bookHistory || []) as BookOwnershipEvent[];
+		const receivedHistory = historyEntries.find(
+			(h) => String(h.toUserId || "") === String(user?.id || ""),
+		);
+		const fallbackReceivedTitle =
+			receivedHistory?.title ||
+			(swap.offerType === "buy" ? "Purchased book" : "Received book");
+		const fallbackReceivedImage =
+			receivedHistory?.imageUrl ||
+			"https://via.placeholder.com/100?text=Book";
+		const isCompleted = swap.status === SwapStatus.COMPLETED;
+		const currentUserOwnsReceivedBook =
+			!!otherBook && String(otherBook.ownerId) === String(user?.id);
+		const receivedBookUnavailable =
+			isCompleted &&
+			(swap.offerType === "swap" || swap.offerType === undefined) &&
+			(!otherBook || !currentUserOwnsReceivedBook);
 
 		// Calculate expiration (e.g., 14 days)
 		const daysDiff =
@@ -3166,14 +4167,19 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 			(1000 * 3600 * 24);
 		const isExpired = swap.status === SwapStatus.PENDING && daysDiff > 14;
 
+		const tr = (key: string, fallback: string) => {
+			const value = t(key);
+			return value === key ? fallback : value;
+		};
 		let statusColor = "bg-gray-100 text-gray-800";
-		let statusText = t(`swaps.status_${swap.status.toLowerCase()}`);
+		let statusText = tr(`swaps.status_${swap.status.toLowerCase()}`, swap.status);
+		const offerTypeLabel = swap.offerType === "buy" ? "Buy Offer" : "Swap Offer";
 
 		if (swap.status === SwapStatus.PENDING) {
 			statusColor = "bg-yellow-100 text-yellow-800";
 			if (isExpired) {
 				statusColor = "bg-orange-100 text-orange-800";
-				statusText = t("swaps.status_expired");
+				statusText = tr("swaps.status_expired", "Expired");
 			}
 		} else if (swap.status === SwapStatus.ACCEPTED) {
 			statusColor = "bg-green-100 text-green-800";
@@ -3187,9 +4193,9 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 		return (
 			<div
 				key={swap.id}
-				className="bg-white rounded-lg shadow-sm border border-gray-200 mb-4 overflow-hidden"
+				className={`${ds.surface} mb-4 overflow-hidden`}
 			>
-				<div className="bg-gray-50 px-4 py-2 border-b flex justify-between items-center text-xs text-gray-500">
+				<div className={`${ds.surfaceHeader} px-4 py-2 flex justify-between items-center text-xs text-slate-600`}>
 					<div className="flex items-center gap-2">
 						<span
 							className="font-bold text-gray-700 cursor-pointer hover:text-primary hover:underline"
@@ -3206,6 +4212,9 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 						</span>
 						<span>•</span>
 						<span>{new Date(swap.lastUpdateDate).toLocaleDateString()}</span>
+						<span className="px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-bold text-[10px] uppercase">
+							{offerTypeLabel}
+						</span>
 					</div>
 					<span
 						className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${statusColor}`}
@@ -3218,28 +4227,41 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 					<div className="flex flex-col md:flex-row gap-4 items-center justify-between">
 						{/* Left Side (You Give) */}
 						<div className="flex-1 w-full flex items-center gap-3">
-							<div className="w-12 h-16 bg-gray-200 rounded shrink-0 overflow-hidden border">
-								<img
-									src={myBook?.imageUrl}
-									className="w-full h-full object-cover"
-									alt=""
-									onError={(e) => {
-										(e.target as HTMLImageElement).src =
-											"https://via.placeholder.com/100?text=Book";
-									}}
-								/>
-							</div>
-							<div className="min-w-0">
-								<p className="text-[10px] font-bold text-blue-500 uppercase tracking-wide mb-0.5">
-									{t("swaps.you_give")}
-								</p>
-								<p
-									className="font-semibold text-gray-800 text-sm truncate"
-									title={myBook?.title}
-								>
-									{myBook?.title || "Unknown Book"}
-								</p>
-							</div>
+							{swap.offerType === "buy" ? (
+								<div className="min-w-0">
+									<p className="text-[10px] font-bold text-blue-500 uppercase tracking-wide mb-0.5">
+										Your Offer
+									</p>
+									<p className="font-semibold text-gray-800 text-sm truncate">
+										{swap.offeredAmount ? `${swap.offeredAmount} TL` : "Amount not set"}
+									</p>
+								</div>
+							) : (
+								<>
+									<div className="w-12 h-16 bg-gray-200 rounded shrink-0 overflow-hidden border">
+										<img
+											src={myBook?.imageUrl}
+											className="w-full h-full object-cover"
+											alt=""
+											onError={(e) => {
+												(e.target as HTMLImageElement).src =
+													"https://via.placeholder.com/100?text=Book";
+											}}
+										/>
+									</div>
+									<div className="min-w-0">
+										<p className="text-[10px] font-bold text-blue-500 uppercase tracking-wide mb-0.5">
+											{t("swaps.you_give")}
+										</p>
+										<p
+											className="font-semibold text-gray-800 text-sm truncate"
+											title={myBook?.title}
+										>
+											{myBook?.title || "Unknown Book"}
+										</p>
+									</div>
+								</>
+							)}
 						</div>
 
 						{/* Middle Arrow */}
@@ -3247,9 +4269,23 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 
 						{/* Right Side (You Get) */}
 						<div
-							className="flex-1 w-full flex items-center gap-3 md:justify-end cursor-pointer hover:bg-gray-50 p-2 rounded transition -mr-2"
-							onClick={() => handleBookClick(otherBook)}
-							title="View Book Details"
+							className={`flex-1 w-full flex items-center gap-3 md:justify-end p-2 rounded transition -mr-2 ${
+								receivedBookUnavailable
+									? "cursor-not-allowed bg-gray-50/60"
+									: "cursor-pointer hover:bg-gray-50"
+							}`}
+							onClick={() => {
+								if (receivedBookUnavailable) {
+									alert("You no longer own this book.");
+									return;
+								}
+								handleBookClick(otherBook);
+							}}
+							title={
+								receivedBookUnavailable
+									? "You no longer own this book"
+									: "View Book Details"
+							}
 						>
 							<div className="min-w-0 md:text-right order-2 md:order-1">
 								<p className="text-[10px] font-bold text-emerald-500 uppercase tracking-wide mb-0.5">
@@ -3257,14 +4293,14 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 								</p>
 								<p
 									className="font-semibold text-gray-800 text-sm truncate"
-									title={otherBook?.title}
+									title={otherBook?.title || fallbackReceivedTitle}
 								>
-									{otherBook?.title || "Unknown Book"}
+									{otherBook?.title || fallbackReceivedTitle}
 								</p>
 							</div>
 							<div className="w-12 h-16 bg-gray-200 rounded shrink-0 overflow-hidden border order-1 md:order-2 relative group">
 								<img
-									src={otherBook?.imageUrl}
+									src={otherBook?.imageUrl || fallbackReceivedImage}
 									className="w-full h-full object-cover"
 									alt=""
 									onError={(e) => {
@@ -3278,26 +4314,34 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 							</div>
 						</div>
 					</div>
+					{receivedBookUnavailable && (
+						<div className="mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+							You no longer own this book.
+						</div>
+					)}
 
 					{swap.message && (
-						<div className="mt-3 text-xs text-gray-600 bg-gray-50 p-2 rounded italic border border-gray-100">
+						<div className={`${ds.surfaceSubtle} mt-3 text-xs text-slate-700 p-2 italic`}>
 							"{swap.message}"
 						</div>
 					)}
 				</div>
 
-				<div className="px-4 py-3 bg-gray-50 border-t flex justify-end gap-2">
+				<div className="px-4 py-3 bg-slate-100 border-t border-slate-200 flex justify-end gap-2">
 					{swap.status === SwapStatus.PENDING && isIncoming && (
 						<>
+							<button onClick={() => handleCounterOffer(swap)} className={ds.btnSecondary}>
+								Counter
+							</button>
 							<button
 								onClick={() => handleUpdateStatus(swap.id, SwapStatus.REJECTED)}
-								className="px-3 py-1.5 text-xs font-medium border border-red-200 text-red-600 rounded hover:bg-red-50 transition"
+								className={ds.btnDanger}
 							>
 								{t("btn.reject")}
 							</button>
 							<button
 								onClick={() => handleUpdateStatus(swap.id, SwapStatus.ACCEPTED)}
-								className="px-3 py-1.5 text-xs font-medium bg-secondary text-white rounded hover:bg-emerald-600 transition shadow-sm"
+								className={ds.btnPrimary}
 							>
 								{t("btn.accept")}
 							</button>
@@ -3306,7 +4350,7 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 					{swap.status === SwapStatus.PENDING && !isIncoming && (
 						<button
 							onClick={() => handleDeleteSwap(swap)}
-							className="px-3 py-1.5 text-xs font-medium border border-gray-300 text-gray-600 rounded hover:bg-white transition"
+							className={ds.btnSecondary}
 						>
 							{t("btn.cancel")}
 						</button>
@@ -3332,8 +4376,7 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 								onClick={() => {
 									if (
 										!window.confirm(
-											t("swaps.confirm_complete") ||
-												"Mark this swap as completed?",
+											tr("swaps.confirm_complete", "Mark this swap as completed?"),
 										)
 									)
 										return;
@@ -3341,7 +4384,7 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 								}}
 								className="px-3 py-1.5 text-xs font-medium bg-emerald-600 text-white rounded hover:bg-emerald-700 transition shadow-sm"
 							>
-								{t("btn.complete") || "Complete"}
+								{tr("btn.complete", "Complete")}
 							</button>
 						</>
 					)}
@@ -3351,9 +4394,9 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 	};
 
 	return (
-		<div className="container mx-auto p-4 max-w-4xl">
-			<div className="flex justify-between items-center mb-6">
-				<h2 className="text-2xl font-bold text-gray-800">{t("swaps.title")}</h2>
+		<div className="container mx-auto p-4 max-w-6xl">
+			<div className="flex justify-between items-center mb-4">
+					<h2 className="text-2xl font-bold text-gray-800">Offers & Requests</h2>
 				<div className="flex gap-2">
 					<button
 						onClick={fetchData}
@@ -3372,32 +4415,142 @@ const SwapsPage: React.FC<{ onViewDetails: (book: Book) => void }> = ({
 			<div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
 				<div>
 					<h3 className="font-bold text-lg mb-4 text-secondary flex items-center gap-2">
-						<span>{t("swaps.incoming")}</span>
+						<span>Active Incoming Offers</span>
 						<span className="bg-secondary text-white text-xs px-2 py-0.5 rounded-full">
-							{incoming.length}
+							{incomingActive.length}
 						</span>
 					</h3>
-					{incoming.length === 0 && (
-						<p className="text-gray-400 text-sm italic">
-							{t("swaps.empty_incoming")}
-						</p>
+					{incomingActive.length === 0 && (
+						<div className="rounded-lg border border-dashed border-amber-300 bg-amber-50 p-3 mb-4">
+							<p className="text-amber-700 text-sm font-semibold">
+								No incoming offers at the moment.
+							</p>
+							<p className="text-amber-600 text-xs">
+								New buy/swap offers from other users will appear here.
+							</p>
+						</div>
 					)}
-					{incoming.map((s) => renderSwapCard(s, true))}
+					{groupedIncoming.map((group) => {
+						const requested = booksMap[group.requestedBookId];
+						return (
+							<div
+								key={`group_${group.requestedBookId}`}
+								className="bg-white rounded-lg shadow-sm border border-blue-200 mb-4 overflow-hidden"
+							>
+								<div className="px-4 py-2 bg-blue-50 border-b">
+									<p className="text-sm font-bold text-blue-800">
+										Competing Offers for:{" "}
+										<span
+											className="underline cursor-pointer"
+											onClick={() => handleBookClick(requested)}
+										>
+											{requested?.title || group.requestedBookId}
+										</span>
+									</p>
+									<p className="text-xs text-blue-600">
+										{group.offers.length} pending offers - compare and act quickly
+									</p>
+								</div>
+								<div className="p-3 space-y-2">
+									{group.offers.map((offer) => {
+										const offeredBook =
+											offer.offerType === "swap"
+												? booksMap[offer.offeredBookIds?.[0]]
+												: undefined;
+										return (
+											<div
+												key={offer.id}
+												className="border rounded p-2 bg-gray-50"
+											>
+												<div className="flex flex-wrap items-center gap-2 text-xs">
+													<span className="font-bold text-gray-700">
+														{offer.offeredByUsername}
+													</span>
+													<span
+														className={`px-2 py-0.5 rounded-full font-bold ${
+															offer.offerType === "buy"
+																? "bg-emerald-100 text-emerald-700"
+																: "bg-indigo-100 text-indigo-700"
+														}`}
+													>
+														{offer.offerType === "buy"
+															? `BUY ${offer.offeredAmount ? `- ${offer.offeredAmount} TL` : ""}`
+															: `SWAP ${offeredBook?.title ? `- ${offeredBook.title}` : ""}`}
+													</span>
+													<span className="text-gray-500">
+														{new Date(offer.lastUpdateDate).toLocaleString()}
+													</span>
+													<div className="ml-auto flex gap-1">
+														<button
+															onClick={() => handleChatForSwap(offer)}
+															className="px-2 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50"
+														>
+															Chat
+														</button>
+														<button
+															onClick={() =>
+																handleUpdateStatus(
+																	offer.id,
+																	SwapStatus.REJECTED,
+																)
+															}
+															className="px-2 py-1 rounded border border-red-200 text-red-600 hover:bg-red-50"
+														>
+															Reject
+														</button>
+														<button
+															onClick={() =>
+																handleUpdateStatus(
+																	offer.id,
+																	SwapStatus.ACCEPTED,
+																)
+															}
+															className="px-2 py-1 rounded bg-secondary text-white hover:bg-emerald-600"
+														>
+															Accept
+														</button>
+													</div>
+												</div>
+											</div>
+										);
+									})}
+								</div>
+							</div>
+						);
+					})}
+					{incomingUngrouped.map((s) => renderSwapCard(s, true))}
 				</div>
 				<div>
 					<h3 className="font-bold text-lg mb-4 text-primary flex items-center gap-2">
-						<span>{t("swaps.outgoing")}</span>
+						<span>Active Outgoing Offers</span>
 						<span className="bg-primary text-white text-xs px-2 py-0.5 rounded-full">
-							{outgoing.length}
+							{outgoingActive.length}
 						</span>
 					</h3>
-					{outgoing.length === 0 && (
+					{outgoingActive.length === 0 && (
 						<p className="text-gray-400 text-sm italic">
-							{t("swaps.empty_outgoing")}
+							No active outgoing offers.
 						</p>
 					)}
-					{outgoing.map((s) => renderSwapCard(s, false))}
+					{outgoingActive.map((s) => renderSwapCard(s, false))}
 				</div>
+			</div>
+			<div className="mt-8">
+				<h3 className="font-bold text-lg mb-4 text-gray-700 flex items-center gap-2">
+					<span>Completed Offers</span>
+					<span className="bg-gray-700 text-white text-xs px-2 py-0.5 rounded-full">
+						{completedOffers.length}
+					</span>
+				</h3>
+				{completedOffers.length === 0 ? (
+					<p className="text-gray-400 text-sm italic">No completed offer history yet.</p>
+				) : (
+					<div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+						{completedOffers.map((s) =>
+							renderSwapCard(s, s.offeredToId === user?.id),
+						)}
+					</div>
+				)}
 			</div>
 		</div>
 	);
@@ -3410,7 +4563,7 @@ const AboutPage: React.FC = () => {
 			<h1 className="text-3xl font-bold text-gray-800 mb-6">
 				{t("about.title")}
 			</h1>
-			<div className="bg-white p-6 rounded-lg shadow space-y-6">
+			<div className="md-surface p-6 space-y-6">
 				<section>
 					<h2 className="text-xl font-bold text-primary mb-2">
 						{t("about.mission")}
@@ -3439,7 +4592,7 @@ const PrivacyPage: React.FC = () => {
 			<h1 className="text-3xl font-bold text-gray-800 mb-6">
 				{t("privacy.title")}
 			</h1>
-			<div className="bg-white p-6 rounded-lg shadow space-y-6">
+			<div className="md-surface p-6 space-y-6">
 				<p className="text-gray-700 italic">{t("privacy.intro")}</p>
 				<section>
 					<h2 className="text-xl font-bold text-gray-800 mb-2">
@@ -3504,7 +4657,7 @@ const ContactPage: React.FC = () => {
 			</h1>
 			<form
 				onSubmit={handleSubmit}
-				className="bg-white p-6 rounded-lg shadow space-y-4"
+				className="md-surface p-6 space-y-4"
 			>
 				<div>
 					<label className="block text-sm font-medium text-gray-700">
@@ -3596,13 +4749,13 @@ const Footer: React.FC = () => {
 					<p className="text-sm opacity-70">{t("footer.desc")}</p>
 				</div>
 				<div className="flex gap-6 text-sm font-medium">
-					<Link to="/about" className="hover:text-white transition">
+					<Link to="/about" className="hover:text-white transition-all duration-200 ease-out hover:-translate-y-0.5 inline-block">
 						{t("footer.about")}
 					</Link>
-					<Link to="/privacy" className="hover:text-white transition">
+					<Link to="/privacy" className="hover:text-white transition-all duration-200 ease-out hover:-translate-y-0.5 inline-block">
 						{t("footer.privacy")}
 					</Link>
-					<Link to="/contact" className="hover:text-white transition">
+					<Link to="/contact" className="hover:text-white transition-all duration-200 ease-out hover:-translate-y-0.5 inline-block">
 						{t("footer.contact")}
 					</Link>
 				</div>
@@ -3663,18 +4816,31 @@ const LandingPage = () => {
 
 function App() {
 	const { user, loading, logout } = useAuth();
+	const isMarketplaceUser = user?.role === 'user';
 	const { language, setLanguage, t } = useLanguage();
 	const [selectedBook, setSelectedBook] = useState<Book | null>(null);
+	const [selectedBookOwnershipHistory, setSelectedBookOwnershipHistory] = useState<
+		BookOwnershipEvent[]
+	>([]);
 	const [editingBook, setEditingBook] = useState<Book | null>(null);
+	const [isBookFormModalOpen, setIsBookFormModalOpen] = useState(false);
 	const [isSwapModalOpen, setIsSwapModalOpen] = useState(false);
 	const [userBooks, setUserBooks] = useState<Book[]>([]);
 	const [selectedOwnBook, setSelectedOwnBook] = useState("");
 	const [swapMessage, setSwapMessage] = useState("");
+	const [offerType, setOfferType] = useState<"swap" | "buy">("swap");
+	const [offeredAmount, setOfferedAmount] = useState("");
 	const [unreadMsgCount, setUnreadMsgCount] = useState(0);
 	const [pendingSwapCount, setPendingSwapCount] = useState(0);
 	const [mobileMenuOpen, setMobileMenuOpen] = useState(false); // Mobile menu state
 	const navigate = useNavigate();
 	const location = useLocation();
+	const isActiveNav = (path: string) =>
+		path === "/messages"
+			? location.pathname.startsWith("/messages")
+			: location.pathname === path;
+	const isProfileNavActive =
+		location.pathname.startsWith("/user/") || location.pathname === "/profile";
 
 	const fetchNotifications = async () => {
 		if (!user) return;
@@ -3724,6 +4890,73 @@ function App() {
 		}
 	}, [user, isSwapModalOpen]);
 
+	useEffect(() => {
+		if (!selectedBook) {
+			setSelectedBookOwnershipHistory([]);
+			return;
+		}
+		api
+			.get<BookOwnershipEvent[]>(
+				`/books/${encodeURIComponent(selectedBook.id)}/ownership-history`,
+			)
+			.then(setSelectedBookOwnershipHistory)
+			.catch(() => setSelectedBookOwnershipHistory([]));
+	}, [selectedBook?.id]);
+
+	const openAddBookModal = () => {
+		setEditingBook(null);
+		setIsBookFormModalOpen(true);
+	};
+
+	const openEditBookModal = (book: Book) => {
+		setEditingBook(book);
+		setIsBookFormModalOpen(true);
+	};
+
+	const closeBookFormModal = () => {
+		setIsBookFormModalOpen(false);
+		setEditingBook(null);
+	};
+
+	const handleGlobalRipple = (e: React.MouseEvent<HTMLDivElement>) => {
+		const target = e.target as HTMLElement;
+		const clickable = target.closest("button, a, label") as HTMLElement | null;
+		if (!clickable || clickable.classList.contains("no-ripple")) return;
+		const computed = window.getComputedStyle(clickable);
+		const bg = computed.backgroundColor || "rgba(255,255,255,1)";
+		const match = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+		const r = match ? Number(match[1]) : 255;
+		const g = match ? Number(match[2]) : 255;
+		const b = match ? Number(match[3]) : 255;
+		const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+		const isDarkBg = luminance < 120;
+		const rect = clickable.getBoundingClientRect();
+		const size = Math.max(rect.width, rect.height);
+		const ripple = document.createElement("span");
+		ripple.className = "md-ripple";
+		ripple.style.setProperty(
+			"--ripple-strong",
+			isDarkBg ? "rgba(255,255,255,0.8)" : "rgba(15,23,42,0.42)",
+		);
+		ripple.style.setProperty(
+			"--ripple-soft",
+			isDarkBg ? "rgba(255,255,255,0.48)" : "rgba(15,23,42,0.22)",
+		);
+		ripple.style.width = `${size}px`;
+		ripple.style.height = `${size}px`;
+		ripple.style.left = `${e.clientX - rect.left - size / 2}px`;
+		ripple.style.top = `${e.clientY - rect.top - size / 2}px`;
+		clickable.classList.add("md-ripple-host");
+		clickable.appendChild(ripple);
+		window.setTimeout(() => ripple.remove(), 550);
+	};
+
+	useEffect(() => {
+		if (!selectedBook) return;
+		if (selectedBook.forSale && !selectedBook.forSwap) setOfferType("buy");
+		else setOfferType("swap");
+	}, [selectedBook]);
+
 	const handleStartChat = async (targetUserId: string, bookId: string) => {
 		try {
 			const chat = await api.post<{ id: string }>("/chats", {
@@ -3738,14 +4971,18 @@ function App() {
 		}
 	};
 
-	const handleSendSwap = async () => {
-		if (!selectedBook || !selectedOwnBook) return;
+	const handleSendOffer = async () => {
+		if (!selectedBook) return;
+		if (offerType === "swap" && !selectedOwnBook) return;
+		if (offerType === "buy" && (!offeredAmount || Number(offeredAmount) <= 0)) return;
 		try {
 			await api.post("/swaps", {
 				id: `swap_${Date.now()}`,
 				offeredToId: selectedBook.ownerId,
-				offeredBookIds: [selectedOwnBook],
+				offeredBookIds: offerType === "swap" ? [selectedOwnBook] : [],
 				requestedBookId: selectedBook.id,
+				offerType,
+				offeredAmount: offerType === "buy" ? Number(offeredAmount) : null,
 				status: SwapStatus.PENDING,
 				message: swapMessage,
 				creationDate: new Date().toISOString(),
@@ -3753,15 +4990,18 @@ function App() {
 			});
 			setIsSwapModalOpen(false);
 			setSelectedBook(null);
+			setSelectedOwnBook("");
+			setOfferedAmount("");
+			setOfferType("swap");
 			alert("Offer sent successfully!");
 			window.location.reload();
 		} catch (e: any) {
-			alert("Failed to send swap offer: " + e.message);
+			alert("Failed to send offer: " + e.message);
 		}
 	};
 
 	const handleDeleteBook = async (bookId: string) => {
-		if (!window.confirm("Are you sure you want to delete this book?")) return;
+		if (!window.confirm("Delete permanently? This will remove the book from your account.")) return;
 		try {
 			await api.delete(`/books/${bookId}`);
 			setSelectedBook(null);
@@ -3795,8 +5035,8 @@ function App() {
 		);
 
 	return (
-		<div className="min-h-screen bg-base_200 flex flex-col">
-			<nav className="bg-primary shadow-md sticky top-0 z-50">
+		<div className={`${ds.pageBg} md-app flex flex-col`} onMouseDownCapture={handleGlobalRipple}>
+			<nav className="bg-gradient-to-r from-blue-700 via-blue-600 to-cyan-600 shadow-lg sticky top-0 z-50 backdrop-blur">
 				<div className="container mx-auto px-4 h-16 flex items-center justify-between">
 					<Link
 						to="/"
@@ -3831,7 +5071,7 @@ function App() {
 									) && (
 										<Link
 											to="/admin"
-											className="text-white flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 transition"
+											className={`${ds.navItemLight} ${isActiveNav("/admin") ? "bg-white/20 ring-1 ring-white/40" : ""}`}
 										>
 											<ShieldCheckIcon className="w-5 h-5" />
 											<span className="font-medium">{t("nav.admin")}</span>
@@ -3839,42 +5079,30 @@ function App() {
 									)}
 									<Link
 										to="/browse"
-										className="text-gray-100 flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 transition"
+										className={`${ds.navItem} ${isActiveNav("/browse") ? "bg-white/20 text-white ring-1 ring-white/40" : ""}`}
 									>
 										<MagnifyingGlassIcon className="w-5 h-5" />
 										<span>{t("nav.browse")}</span>
 									</Link>
-									{!["super_admin", "admin", "moderator"].includes(
-										user.role,
-									) && (
-										<Link
-											to="/my-books"
-											className="text-gray-100 flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 transition"
-										>
-											<BookOpenIcon className="w-5 h-5" />
-											<span>{t("nav.my_books")}</span>
-										</Link>
-									)}
-									{/* My Listings removed — consolidated into My Books */}
-									{!["super_admin", "admin", "moderator"].includes(
-										user.role,
-									) && (
-										<Link
-											to="/swaps"
-											className="text-gray-100 flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 transition relative"
-										>
-											<ArrowPathRoundedSquareIcon className="w-5 h-5" />
-											<span>{t("nav.swaps")}</span>
-											{pendingSwapCount > 0 && (
-												<span className="absolute top-1 right-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
-													{pendingSwapCount}
-												</span>
-											)}
-										</Link>
+									{isMarketplaceUser && (
+										<>
+											<Link
+												to="/swaps"
+												className={`${ds.navItem} relative ${isActiveNav("/swaps") ? "bg-white/20 text-white ring-1 ring-white/40" : ""}`}
+											>
+												<ArrowPathRoundedSquareIcon className="w-5 h-5" />
+												<span>Offers</span>
+												{pendingSwapCount > 0 && (
+													<span className="absolute top-1 right-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+														{pendingSwapCount}
+													</span>
+												)}
+											</Link>
+										</>
 									)}
 									<Link
 										to="/messages"
-										className="text-gray-100 flex items-center gap-2 px-3 py-2 rounded-md hover:bg-white/10 transition relative"
+										className={`${ds.navItem} relative ${isActiveNav("/messages") ? "bg-white/20 text-white ring-1 ring-white/40" : ""}`}
 									>
 										<ChatBubbleLeftRightIcon className="w-5 h-5" />
 										<span>{t("nav.messages")}</span>
@@ -3886,14 +5114,14 @@ function App() {
 									</Link>
 									<button
 										onClick={logout}
-										className="text-red-100 hover:text-white hover:bg-white/10 px-3 py-2 rounded-md transition flex items-center gap-2"
+										className={ds.navItemDanger}
 									>
 										<ArrowRightOnRectangleIcon className="w-5 h-5" />
 										<span>{t("nav.logout")}</span>
 									</button>
 									<Link
 										to={`/user/${user.id}`}
-										className="flex items-center text-white font-medium pl-2 border-l border-blue-400 ml-2 hover:bg-blue-600 rounded pr-2 py-1 transition gap-2"
+										className={`flex items-center text-white font-medium pl-2 border-l border-blue-400 ml-2 hover:bg-blue-600 rounded pr-2 py-1 transition-all duration-200 ease-out gap-2 hover:-translate-y-0.5 active:scale-[0.98] ${isProfileNavActive ? "bg-white/20 ring-1 ring-white/40" : ""}`}
 									>
 										{user.avatarUrl ? (
 											<img
@@ -3911,14 +5139,14 @@ function App() {
 								<div className="space-x-4 flex items-center">
 									<Link
 										to="/login"
-										className="text-white hover:bg-white/10 px-3 py-2 rounded-md transition flex items-center gap-2"
+										className={`${ds.navItemLight} ${isActiveNav("/login") ? "bg-white/20 ring-1 ring-white/40" : ""}`}
 									>
 										<ArrowLeftOnRectangleIcon className="w-5 h-5" />
 										<span>{t("nav.login")}</span>
 									</Link>
 									<Link
 										to="/register"
-										className="bg-white text-primary px-3 py-2 rounded font-medium hover:bg-gray-100 transition flex items-center gap-2"
+										className={`bg-white text-primary px-3 py-2 rounded font-medium hover:bg-gray-100 transition-all duration-200 ease-out flex items-center gap-2 hover:-translate-y-0.5 hover:shadow active:scale-[0.98] ${isActiveNav("/register") ? "ring-2 ring-white/60" : ""}`}
 									>
 										<UserPlusIcon className="w-5 h-5" />
 										<span>{t("nav.register")}</span>
@@ -3951,7 +5179,7 @@ function App() {
 								<>
 									<Link
 										to={`/user/${user.id}`}
-										className="flex items-center text-white font-bold p-3 rounded-md hover:bg-blue-600 border border-blue-400 mb-2 gap-3 bg-blue-500/20"
+										className={`flex items-center text-white font-bold p-3 rounded-md hover:bg-blue-600 border border-blue-400 mb-2 gap-3 bg-blue-500/20 ${isProfileNavActive ? "ring-1 ring-white/40" : ""}`}
 									>
 										{user.avatarUrl ? (
 											<img
@@ -3969,7 +5197,7 @@ function App() {
 									) && (
 										<Link
 											to="/admin"
-											className="text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600"
+									className={`text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600 transition-all duration-200 ease-out hover:-translate-y-0.5 ${isActiveNav("/admin") ? "bg-white/20 ring-1 ring-white/40" : ""}`}
 										>
 											<ShieldCheckIcon className="w-5 h-5" />
 											{t("nav.admin")}
@@ -3977,41 +5205,32 @@ function App() {
 									)}
 									<Link
 										to="/browse"
-										className="text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600"
+										className={`text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600 transition-all duration-200 ease-out hover:-translate-y-0.5 ${isActiveNav("/browse") ? "bg-white/20 ring-1 ring-white/40" : ""}`}
 									>
 										<MagnifyingGlassIcon className="w-5 h-5" />
 										{t("nav.browse")}
 									</Link>
-									{!["super_admin", "admin", "moderator"].includes(user.role) && (
-										<Link
-											to="/my-books"
-											className="text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600"
-										>
-											<BookOpenIcon className="w-5 h-5" />
-											{t("nav.my_books")}
-										</Link>
-									)}
-									{!["super_admin", "admin", "moderator"].includes(
-										user.role,
-									) && (
-										<Link
-											to="/swaps"
-											className="text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600 justify-between"
-										>
-											<div className="flex items-center gap-3">
-												<ArrowPathRoundedSquareIcon className="w-5 h-5" />
-												{t("nav.swaps")}
-											</div>
-											{pendingSwapCount > 0 && (
-												<span className="bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full">
-													{pendingSwapCount}
-												</span>
-											)}
-										</Link>
+									{isMarketplaceUser && (
+										<>
+											<Link
+												to="/swaps"
+												className={`text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600 justify-between transition-all duration-200 ease-out hover:-translate-y-0.5 ${isActiveNav("/swaps") ? "bg-white/20 ring-1 ring-white/40" : ""}`}
+											>
+												<div className="flex items-center gap-3">
+													<ArrowPathRoundedSquareIcon className="w-5 h-5" />
+													Offers
+												</div>
+												{pendingSwapCount > 0 && (
+													<span className="bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full">
+														{pendingSwapCount}
+													</span>
+												)}
+											</Link>
+										</>
 									)}
 									<Link
 										to="/messages"
-										className="text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600 justify-between"
+										className={`text-white flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600 justify-between transition-all duration-200 ease-out hover:-translate-y-0.5 ${isActiveNav("/messages") ? "bg-white/20 ring-1 ring-white/40" : ""}`}
 									>
 										<div className="flex items-center gap-3">
 											<ChatBubbleLeftRightIcon className="w-5 h-5" />
@@ -4025,7 +5244,7 @@ function App() {
 									</Link>
 									<button
 										onClick={logout}
-										className="text-red-100 flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600 w-full text-left"
+										className="text-red-100 flex items-center gap-3 px-3 py-3 rounded-md hover:bg-blue-600 w-full text-left transition-all duration-200 ease-out hover:-translate-y-0.5"
 									>
 										<ArrowRightOnRectangleIcon className="w-5 h-5" />
 										{t("nav.logout")}
@@ -4035,14 +5254,14 @@ function App() {
 								<div className="flex flex-col gap-2 mt-2">
 									<Link
 										to="/login"
-										className="text-white bg-blue-600 px-3 py-3 rounded-md flex items-center gap-3 justify-center border border-blue-400"
+										className={`text-white bg-blue-600 px-3 py-3 rounded-md flex items-center gap-3 justify-center border border-blue-400 ${isActiveNav("/login") ? "ring-1 ring-white/40" : ""}`}
 									>
 										<ArrowLeftOnRectangleIcon className="w-5 h-5" />
 										{t("nav.login")}
 									</Link>
 									<Link
 										to="/register"
-										className="bg-white text-primary px-3 py-3 rounded-md font-bold flex items-center gap-3 justify-center"
+										className={`bg-white text-primary px-3 py-3 rounded-md font-bold flex items-center gap-3 justify-center ${isActiveNav("/register") ? "ring-2 ring-white/60" : ""}`}
 									>
 										<UserPlusIcon className="w-5 h-5" />
 										{t("nav.register")}
@@ -4055,7 +5274,11 @@ function App() {
 			</nav>
 
 			<main className="flex-grow">
-				<Routes>
+				<div
+					key={`${location.pathname}${location.search}`}
+					className="page-enter h-full"
+				>
+					<Routes>
 					<Route
 						path="/"
 						element={user ? <Navigate to="/browse" /> : <LandingPage />}
@@ -4070,17 +5293,7 @@ function App() {
 						path="/my-books"
 						element={
 							user ? (
-								!["super_admin", "admin", "moderator"].includes(user.role) ? (
-									<MyBooksPage
-										onViewDetails={setSelectedBook}
-										onEditBook={(b) => {
-											setEditingBook(b);
-											navigate("/edit-book");
-										}}
-									/>
-								) : (
-									<Navigate to="/" />
-								)
+								<Navigate to={`/user/${user.id}`} />
 							) : (
 								<Navigate to="/login" />
 							)
@@ -4089,29 +5302,13 @@ function App() {
 					<Route
 						path="/add-book"
 						element={
-							user ? (
-								!["super_admin", "admin", "moderator"].includes(user.role) ? (
-									<AddEditBookForm />
-								) : (
-									<Navigate to="/" />
-								)
-							) : (
-								<Navigate to="/login" />
-							)
+							<Navigate to={user ? `/user/${user.id}` : "/login"} />
 						}
 					/>
 					<Route
 						path="/edit-book"
 						element={
-							user ? (
-								!["super_admin", "admin", "moderator"].includes(user.role) ? (
-									<AddEditBookForm initialBook={editingBook} />
-								) : (
-									<Navigate to="/" />
-								)
-							) : (
-								<Navigate to="/login" />
-							)
+							<Navigate to={user ? `/user/${user.id}` : "/login"} />
 						}
 					/>
 					<Route
@@ -4119,7 +5316,7 @@ function App() {
 						element={
 							user &&
 							["super_admin", "admin", "moderator"].includes(user.role) ? (
-								<AdminPanel />
+								<AdminPanel onViewDetails={setSelectedBook} />
 							) : (
 								<Navigate to="/" />
 							)
@@ -4133,7 +5330,10 @@ function App() {
 						path="/user/:userId"
 						element={
 							user ? (
-								<PublicProfilePage onViewDetails={setSelectedBook} />
+								<PublicProfilePage
+									onViewDetails={setSelectedBook}
+									onOpenAddBook={openAddBookModal}
+								/>
 							) : (
 								<Navigate to="/login" />
 							)
@@ -4171,21 +5371,35 @@ function App() {
 					<Route
 						path="/swaps"
 						element={
-							user ? (
-								!["super_admin", "admin", "moderator"].includes(user.role) ? (
-									<SwapsPage onViewDetails={setSelectedBook} />
-								) : (
-									<Navigate to="/" />
-								)
+							user && isMarketplaceUser ? (
+								<SwapsPage onViewDetails={setSelectedBook} />
 							) : (
-								<Navigate to="/login" />
+								<Navigate to={user ? "/admin" : "/login"} />
 							)
 						}
 					/>
-				</Routes>
+					</Routes>
+				</div>
 			</main>
 
 			{!location.pathname.startsWith("/messages") && <Footer />}
+
+			{user && isMarketplaceUser && isBookFormModalOpen && (
+				<Modal
+					isOpen={isBookFormModalOpen}
+					onClose={closeBookFormModal}
+					title={editingBook ? t("btn.edit") : t("my_books.add_new")}
+				>
+					<AddEditBookForm
+						initialBook={editingBook}
+						onCancel={closeBookFormModal}
+						onDone={() => {
+							closeBookFormModal();
+							window.location.reload();
+						}}
+					/>
+				</Modal>
+			)}
 
 			{selectedBook && (
 				<Modal
@@ -4197,6 +5411,7 @@ function App() {
 						<div className="flex justify-center mb-6 bg-gray-50 rounded-lg p-2 relative">
 							<img
 								src={selectedBook.imageUrl}
+								alt={selectedBook.title}
 								className="max-h-80 w-full object-contain shadow-sm"
 								onError={(e) => {
 									(e.target as HTMLImageElement).src =
@@ -4285,7 +5500,7 @@ function App() {
 								{selectedBook.department && (
 									<div>
 										<label className="text-xs font-bold text-gray-500 uppercase tracking-wide">
-											{t("book.department")}
+											Genre
 										</label>
 										<div className="text-gray-900">
 											{selectedBook.department}
@@ -4304,7 +5519,7 @@ function App() {
 							<div className="flex flex-wrap gap-2 pt-2">
 								{selectedBook.forSale && (
 									<span className="bg-emerald-100 text-emerald-800 px-3 py-1 rounded-full text-sm font-bold border border-emerald-200">
-										{t("book.price")}: {selectedBook.price} TL
+										{t("book.for_sale")} - {selectedBook.price} TL
 									</span>
 								)}
 								{selectedBook.forSwap && (
@@ -4313,6 +5528,28 @@ function App() {
 									</span>
 								)}
 							</div>
+							{selectedBookOwnershipHistory.length > 0 && (
+								<div>
+									<label className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-1 block">
+										Ownership History
+									</label>
+									<div className="bg-slate-50 border border-slate-200 rounded-md p-2 space-y-2 max-h-40 overflow-y-auto">
+										{selectedBookOwnershipHistory.map((h) => (
+											<div key={h.id} className="text-xs text-slate-700 border-b border-slate-100 pb-1 last:border-b-0 last:pb-0">
+												<div className="font-semibold">
+													{h.transferKind === "sale" ? "Sale" : "Swap"} -{" "}
+													{new Date(h.createdAt).toLocaleString()}
+												</div>
+												<div>
+													From <span className="font-medium">{h.fromUsername || h.fromUserId || "-"}</span> to{" "}
+													<span className="font-medium">{h.toUsername || h.toUserId || "-"}</span>
+												</div>
+												{h.note && <div className="italic text-slate-500">{h.note}</div>}
+											</div>
+										))}
+									</div>
+								</div>
+							)}
 						</div>
 						{user && (
 							<div className="mt-8 flex flex-col gap-3 pt-4 border-t">
@@ -4327,14 +5564,20 @@ function App() {
 											<ChatBubbleLeftRightIcon className="w-5 h-5" />{" "}
 											{t("modal.message_owner")}
 										</button>
-										{selectedBook.forSwap &&
+										{user.role === 'user' && (selectedBook.forSwap || selectedBook.forSale) &&
 											selectedBook.status === BookStatus.AVAILABLE && (
 												<button
-													onClick={() => setIsSwapModalOpen(true)}
+													onClick={() => {
+														setSelectedOwnBook("");
+														setSwapMessage("");
+														setOfferedAmount("");
+														setOfferType(selectedBook.forSale && !selectedBook.forSwap ? "buy" : "swap");
+														setIsSwapModalOpen(true);
+													}}
 													className="flex-1 bg-secondary text-white py-2.5 rounded hover:bg-emerald-600 flex justify-center items-center gap-2 font-medium transition shadow-sm"
 												>
 													<ArrowPathRoundedSquareIcon className="w-5 h-5" />{" "}
-													{t("modal.offer_swap")}
+													Send Offer
 												</button>
 											)}
 									</div>
@@ -4415,8 +5658,7 @@ function App() {
 													<button
 														onClick={() => {
 															setSelectedBook(null);
-															setEditingBook(selectedBook);
-															navigate("/edit-book");
+															openEditBookModal(selectedBook);
 														}}
 														className="w-full bg-blue-100 text-blue-700 py-2 rounded hover:bg-blue-200 text-sm font-semibold transition"
 													>
@@ -4473,34 +5715,72 @@ function App() {
 				<Modal
 					isOpen={isSwapModalOpen}
 					onClose={() => setIsSwapModalOpen(false)}
-					title={t("swap_modal.title")}
+					title="Send Offer"
 				>
 					<div className="p-4 space-y-4">
 						<p className="text-gray-600">
 							{t("swap_modal.requesting")}{" "}
 							<strong className="text-black">{selectedBook?.title}</strong>
 						</p>
-						<div>
-							<label className="block text-sm font-medium text-gray-700 mb-1">
-								{t("swap_modal.give_label")}
-							</label>
-							{userBooks.length > 0 ? (
-								<select
-									className="w-full p-2 border border-gray-300 rounded focus:ring-secondary focus:border-secondary"
-									value={selectedOwnBook}
-									onChange={(e) => setSelectedOwnBook(e.target.value)}
-								>
-									<option value="">{t("swap_modal.select_placeholder")}</option>
-									{userBooks.map((b) => (
-										<option key={b.id} value={b.id}>
-											{b.title}
-										</option>
-									))}
-								</select>
-							) : (
-								<div className="text-red-500 text-sm">
-									{t("swap_modal.no_books")}
+						{selectedBook?.forSale && selectedBook?.forSwap && (
+							<div>
+								<label className="block text-sm font-medium text-gray-700 mb-2">Offer Type</label>
+								<div className="flex gap-2">
+									<button
+										type="button"
+										onClick={() => setOfferType("swap")}
+										className={`px-3 py-2 rounded border text-sm font-semibold ${offerType === "swap" ? "bg-blue-100 border-blue-300 text-blue-700" : "bg-white border-gray-300 text-gray-600"}`}
+									>
+										Swap Request
+									</button>
+									<button
+										type="button"
+										onClick={() => setOfferType("buy")}
+										className={`px-3 py-2 rounded border text-sm font-semibold ${offerType === "buy" ? "bg-emerald-100 border-emerald-300 text-emerald-700" : "bg-white border-gray-300 text-gray-600"}`}
+									>
+										Buy Request
+									</button>
 								</div>
+							</div>
+						)}
+						<div>
+							{offerType === "buy" ? (
+								<>
+									<label className="block text-sm font-medium text-gray-700 mb-1">Your Buy Offer Amount</label>
+									<input
+										type="number"
+										min={1}
+										step="0.01"
+										className="w-full p-2 border border-gray-300 rounded focus:ring-secondary focus:border-secondary"
+										placeholder="Enter amount"
+										value={offeredAmount}
+										onChange={(e) => setOfferedAmount(e.target.value)}
+									/>
+								</>
+							) : (
+								<>
+									<label className="block text-sm font-medium text-gray-700 mb-1">
+										{t("swap_modal.give_label")}
+									</label>
+									{userBooks.length > 0 ? (
+										<select
+											className="w-full p-2 border border-gray-300 rounded focus:ring-secondary focus:border-secondary"
+											value={selectedOwnBook}
+											onChange={(e) => setSelectedOwnBook(e.target.value)}
+										>
+											<option value="">{t("swap_modal.select_placeholder")}</option>
+											{userBooks.map((b) => (
+												<option key={b.id} value={b.id}>
+													{b.title}
+												</option>
+											))}
+										</select>
+									) : (
+										<div className="text-red-500 text-sm">
+											{t("swap_modal.no_books")}
+										</div>
+									)}
+								</>
 							)}
 						</div>
 						<div>
@@ -4523,8 +5803,8 @@ function App() {
 								{t("btn.cancel")}
 							</button>
 							<button
-								onClick={handleSendSwap}
-								disabled={!selectedOwnBook}
+								onClick={handleSendOffer}
+								disabled={offerType === "swap" ? !selectedOwnBook : !offeredAmount || Number(offeredAmount) <= 0}
 								className="bg-secondary text-white px-6 py-2 rounded disabled:bg-gray-300 disabled:cursor-not-allowed hover:bg-emerald-600 font-medium"
 							>
 								{t("btn.send_offer")}

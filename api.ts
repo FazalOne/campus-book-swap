@@ -6,7 +6,7 @@ import { User } from './types';
 // If the user visits 'http://192.168.1.5:5173', hostname is '192.168.1.5'.
 // We assume the backend is running on the SAME machine (IP) but on port 3001.
 const hostname = window.location.hostname || 'localhost';
-const API_URL = `http://${hostname}:3001/api`;
+const API_URL = (import.meta.env.VITE_API_URL || `http://${hostname}:3001/api`).replace(/\/$/, '');
 
 const getHeaders = () => {
   const headers: HeadersInit = {
@@ -14,12 +14,24 @@ const getHeaders = () => {
   };
   const userStr = localStorage.getItem('user');
   if (userStr) {
-    const user = JSON.parse(userStr) as User;
-    if (user.token) {
-      headers['Authorization'] = `Bearer ${user.token}`;
+    try {
+      const user = JSON.parse(userStr) as User;
+      if (user.token) {
+        headers['Authorization'] = `Bearer ${user.token}`;
+      }
+    } catch {
+      localStorage.removeItem('user');
     }
   }
   return headers;
+};
+
+const throwForAuth = async (response: Response) => {
+  if (response.status === 401 || response.status === 403) {
+    localStorage.removeItem('user');
+    window.location.href = '/login';
+  }
+  throw new Error(await response.text());
 };
 
 export const api = {
@@ -36,11 +48,7 @@ export const api = {
         },
       });
       if (!response.ok) {
-          if (response.status === 401) {
-               localStorage.removeItem('user');
-               window.location.href = '/login';
-          }
-          throw new Error(await response.text());
+          await throwForAuth(response);
       }
       return response.json();
     } catch (error: any) {
@@ -59,7 +67,7 @@ export const api = {
         headers: getHeaders(),
         body: JSON.stringify(body),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) await throwForAuth(response);
       return response.json();
     } catch (error: any) {
       console.error("API POST Error:", error);
@@ -77,7 +85,7 @@ export const api = {
         headers: getHeaders(),
         body: JSON.stringify(body),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) await throwForAuth(response);
       return response.json();
     } catch (error: any) {
       console.error("API PUT Error:", error);
@@ -94,7 +102,7 @@ export const api = {
         method: 'DELETE',
         headers: getHeaders(),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) await throwForAuth(response);
       return response.json();
     } catch (error: any) {
       console.error("API DELETE Error:", error);
