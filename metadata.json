@@ -1,7 +1,0 @@
-{
-    "name": "Campus Book Swap",
-    "description": "A platform for university students to safely and easily buy, sell, and swap second-hand textbooks and other books. Features direct book-for-book swaps and an integrated chat system for seamless communication.",
-    "requestFramePermissions": [
-        "geolocation"
-    ]
-}
