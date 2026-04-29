@@ -23,9 +23,9 @@ import {
 	ContactMessage,
 	BookOwnershipEvent,
 } from "./types";
-import { api } from "./api";
-import { useAuth } from "./AuthContext";
-import { useLanguage } from "./LanguageContext";
+import { api } from "./lib/api";
+import { useAuth } from "./contexts/AuthContext";
+import { useLanguage } from "./contexts/LanguageContext";
 import { LoginPage, RegisterPage } from "./AuthPages";
 import { DEPARTMENTS } from "./constants";
 import { ds } from "./designSystem";

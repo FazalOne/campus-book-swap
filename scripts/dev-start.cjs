@@ -63,10 +63,10 @@ async function findAvailablePort(candidates) {
 }
 
 (async () => {
-  console.log('Starting backend (node server.ts) and Vite (npm run dev)...');
+  console.log('Starting backend (tsx server/index.ts) and Vite (npm run dev)...');
 
   // start backend
-  children.push(spawnProc('npx', ['tsx', 'server.ts'], 'backend'));
+  children.push(spawnProc('npx', ['tsx', 'server/index.ts'], 'backend'));
 
   // Determine Vite port: prefer env var, else try common ports
   const envPort = process.env.VITE_PORT || process.env.DEV_PORT || process.env.PORT;

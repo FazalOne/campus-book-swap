@@ -1,5 +1,5 @@
 
-import { User } from './types';
+import { User } from '../types';
 
 // Dynamic API URL for Local Network Support.
 // If the user visits 'http://localhost:5173', hostname is 'localhost'.

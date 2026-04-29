@@ -1,10 +1,10 @@
 
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { api } from './api';
-import { useAuth } from './AuthContext';
+import { api } from './lib/api';
+import { useAuth } from './contexts/AuthContext';
 import { User, AuthResponse } from './types';
-import { useLanguage } from './LanguageContext';
+import { useLanguage } from './contexts/LanguageContext';
 import { ds } from './designSystem';
 
 export const LoginPage: React.FC = () => {

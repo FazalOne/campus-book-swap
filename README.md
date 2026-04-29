@@ -31,11 +31,25 @@ Includes admin moderation, demo data seeding, and offer audit visibility.
 
 ## Project Structure
 
-- `App.tsx` - main app UI, routing, major page components
-- `server.ts` - API server, schema creation/migrations, business logic
-- `api.ts` - frontend API client
-- `types.ts` - shared frontend domain types
-- `scripts/dev-start.cjs` - launches backend + Vite together
+```
+├── src/                    # React frontend (Vite)
+│   ├── main.tsx            # entry (mounts App)
+│   ├── App.tsx             # routes, pages, main UI
+│   ├── AuthPages.tsx       # login / register
+│   ├── constants.ts
+│   ├── designSystem.ts
+│   ├── types.ts
+│   ├── contexts/           # AuthContext, LanguageContext
+│   ├── lib/                # api client
+│   └── styles/             # ui.css (global animations / utilities)
+├── server/
+│   └── index.ts            # Express API, DB schema, business logic
+├── scripts/
+│   └── dev-start.cjs       # runs server + Vite together
+├── index.html
+├── vite.config.ts
+└── package.json
+```
 
 ## Configuration files (what belongs on GitHub)
 
