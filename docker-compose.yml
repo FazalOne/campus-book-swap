@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: campus-book-swap-db
+    environment:
+      POSTGRES_DB: campusbookswap
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d campusbookswap"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    container_name: campus-book-swap-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3001
+      VITE_PORT: 3000
+      VITE_API_URL: http://localhost:3001/api
+      CORS_ORIGIN: http://localhost:3000,http://127.0.0.1:3000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: campusbookswap
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      JWT_SECRET: demo_local_jwt_secret_change_me
+      JWT_EXPIRES_IN: 12h
+      BODY_LIMIT: 10mb
+      SEED_ADMIN_USERNAME: admin
+      SEED_ADMIN_PASSWORD: admin123
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    restart: unless-stopped
+
+volumes:
+  pg_data:
