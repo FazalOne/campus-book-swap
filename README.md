@@ -34,18 +34,23 @@ Includes admin moderation, demo data seeding, and offer audit visibility.
 ```
 ├── src/                    # React frontend (Vite)
 │   ├── main.tsx            # entry (mounts App)
-│   ├── App.tsx             # routes, pages, main UI
+│   ├── App.tsx             # app shell: routes, nav, global modals
 │   ├── AuthPages.tsx       # login / register
 │   ├── constants.ts
 │   ├── designSystem.ts
 │   ├── types.ts
+│   ├── components/         # shared UI (icons, Modal, BookCard, Footer, …)
+│   ├── pages/              # route-level screens (browse, chat, admin, profile, …)
 │   ├── contexts/           # AuthContext, LanguageContext
-│   ├── lib/                # api client
+│   ├── lib/                # api client, book label helpers (i18n keys)
 │   └── styles/             # ui.css (global animations / utilities)
 ├── server/
 │   └── index.ts            # Express API, DB schema, business logic
 ├── scripts/
-│   └── dev-start.cjs       # runs server + Vite together
+│   ├── dev-start.cjs       # runs server + Vite together
+│   ├── split-app-once.mjs  # (maint.) slice App.tsx by line ranges → _extracted/
+│   ├── assemble-split.mjs  # (maint.) build components/pages from slices
+│   └── trim-app.mjs        # (maint.) replace App.tsx with imports + tail slice
 ├── index.html
 ├── vite.config.ts
 └── package.json
@@ -202,6 +207,12 @@ Meaning of each variable (same as the `.env` template above):
 - `npm run start` - backend + frontend together (`scripts/dev-start.cjs`)
 - `npm run build` - production frontend build
 - `npm run preview` - preview built frontend
+
+Optional maintainer scripts (only if you re-split `App.tsx`; see comments in each file for line-number caveats):
+
+- `node scripts/split-app-once.mjs` → writes `src/_extracted/*.txt`
+- `node scripts/assemble-split.mjs` → regenerates `src/components/*` and `src/pages/*` from those slices
+- `node scripts/trim-app.mjs` → trims `App.tsx` to imports + the `function App()` block (must match current line numbers)
 
 ## Final Verification Checklist (Before Push)
 
