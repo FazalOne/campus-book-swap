@@ -27,9 +27,9 @@ const getHeaders = () => {
 };
 
 const throwForAuth = async (response: Response) => {
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 401) {
     localStorage.removeItem('user');
-    window.location.href = '/login';
+    window.location.hash = '#/login';
   }
   throw new Error(await response.text());
 };

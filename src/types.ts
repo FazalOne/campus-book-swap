@@ -107,6 +107,7 @@ export interface SwapOffer {
     offeredToUsername?: string; // Added
     offeredBookIds: string[];
     requestedBookId: string;
+    requestedBookIds?: string[];
     offerType?: "swap" | "buy";
     offeredAmount?: number;
     status: SwapStatus;

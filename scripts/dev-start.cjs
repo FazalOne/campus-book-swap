@@ -137,15 +137,28 @@ async function findAvailablePort(candidates) {
 function openBrowser(url) {
   const { spawn } = require('child_process');
   const plat = process.platform;
+  const skipOpen =
+    process.env.BROWSER === 'none' ||
+    process.env.CI === 'true' ||
+    process.env.NO_BROWSER === '1' ||
+    (!process.env.DISPLAY && plat !== 'win32' && plat !== 'darwin');
+  if (skipOpen) {
+    console.log(`Browser auto-open skipped for ${url}`);
+    return;
+  }
   console.log(`Opening browser at ${url}`);
   try {
+    let child;
     if (plat === 'win32') {
-      spawn('cmd', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore' });
+      child = spawn('cmd', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore' });
     } else if (plat === 'darwin') {
-      spawn('open', [url], { detached: true, stdio: 'ignore' });
+      child = spawn('open', [url], { detached: true, stdio: 'ignore' });
     } else {
-      spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
+      child = spawn('xdg-open', [url], { detached: true, stdio: 'ignore' });
     }
+    child.on('error', (e) => {
+      console.error(`Browser open failed for ${url}:`, e.message);
+    });
   } catch (e) {
     console.error('Failed to open browser:', e);
   }

@@ -60,6 +60,8 @@ function App() {
 	const [isBookFormModalOpen, setIsBookFormModalOpen] = useState(false);
 	const [isSwapModalOpen, setIsSwapModalOpen] = useState(false);
 	const [userBooks, setUserBooks] = useState<Book[]>([]);
+	const [sellerBooks, setSellerBooks] = useState<Book[]>([]);
+	const [selectedRequestedBookIds, setSelectedRequestedBookIds] = useState<string[]>([]);
 	const [selectedOwnBook, setSelectedOwnBook] = useState("");
 	const [swapMessage, setSwapMessage] = useState("");
 	const [offerType, setOfferType] = useState<"swap" | "buy">("swap");
@@ -112,6 +114,7 @@ function App() {
 	useEffect(() => {
 		if (user && isSwapModalOpen) {
 			api.get<Book[]>("/books").then((allBooks) => {
+				const wantsSale = offerType === "buy";
 				setUserBooks(
 					allBooks.filter(
 						(b) =>
@@ -120,9 +123,24 @@ function App() {
 							b.status === BookStatus.AVAILABLE,
 					),
 				);
+				if (selectedBook?.ownerId) {
+					const nextSellerBooks = allBooks.filter(
+							(b) =>
+								b.ownerId === selectedBook.ownerId &&
+								b.status === BookStatus.AVAILABLE &&
+								(wantsSale ? b.forSale : b.forSwap),
+						);
+					setSellerBooks(nextSellerBooks);
+					setSelectedRequestedBookIds((prev) => {
+						const allowed = new Set(nextSellerBooks.map((b) => b.id));
+						const kept = prev.filter((id) => allowed.has(id));
+						if (kept.length > 0) return kept;
+						return allowed.has(selectedBook.id) ? [selectedBook.id] : [];
+					});
+				}
 			});
 		}
-	}, [user, isSwapModalOpen]);
+	}, [user, isSwapModalOpen, selectedBook?.id, selectedBook?.ownerId, offerType]);
 
 	useEffect(() => {
 		if (!selectedBook) {
@@ -207,6 +225,11 @@ function App() {
 
 	const handleSendOffer = async () => {
 		if (!selectedBook) return;
+		const requestedBookIds =
+			selectedRequestedBookIds.length > 0
+				? selectedRequestedBookIds
+				: [selectedBook.id];
+		if (requestedBookIds.length === 0) return;
 		if (offerType === "swap" && !selectedOwnBook) return;
 		if (offerType === "buy" && (!offeredAmount || Number(offeredAmount) <= 0)) return;
 		try {
@@ -214,7 +237,8 @@ function App() {
 				id: `swap_${Date.now()}`,
 				offeredToId: selectedBook.ownerId,
 				offeredBookIds: offerType === "swap" ? [selectedOwnBook] : [],
-				requestedBookId: selectedBook.id,
+				requestedBookId: requestedBookIds[0],
+				requestedBookIds,
 				offerType,
 				offeredAmount: offerType === "buy" ? Number(offeredAmount) : null,
 				status: SwapStatus.PENDING,
@@ -225,6 +249,8 @@ function App() {
 			setIsSwapModalOpen(false);
 			setSelectedBook(null);
 			setSelectedOwnBook("");
+			setSellerBooks([]);
+			setSelectedRequestedBookIds([]);
 			setOfferedAmount("");
 			setOfferType("swap");
 			alert("Offer sent successfully!");
@@ -803,6 +829,7 @@ function App() {
 												<button
 													onClick={() => {
 														setSelectedOwnBook("");
+														setSelectedRequestedBookIds([selectedBook.id]);
 														setSwapMessage("");
 														setOfferedAmount("");
 														setOfferType(selectedBook.forSale && !selectedBook.forSwap ? "buy" : "swap");
@@ -956,6 +983,30 @@ function App() {
 							{t("swap_modal.requesting")}{" "}
 							<strong className="text-black">{selectedBook?.title}</strong>
 						</p>
+						{sellerBooks.length > 1 && (
+							<div>
+								<label className="block text-sm font-medium text-gray-700 mb-2">
+									Select books you are requesting
+								</label>
+								<div className="max-h-32 overflow-y-auto border rounded p-2 space-y-1">
+									{sellerBooks.map((b) => (
+										<label key={b.id} className="flex items-center gap-2 text-sm">
+											<input
+												type="checkbox"
+												checked={selectedRequestedBookIds.includes(b.id)}
+												onChange={(e) => {
+													setSelectedRequestedBookIds((prev) => {
+														if (e.target.checked) return Array.from(new Set([...prev, b.id]));
+														return prev.filter((id) => id !== b.id);
+													});
+												}}
+											/>
+											<span>{b.title}</span>
+										</label>
+									))}
+								</div>
+							</div>
+						)}
 						{selectedBook?.forSale && selectedBook?.forSwap && (
 							<div>
 								<label className="block text-sm font-medium text-gray-700 mb-2">Offer Type</label>
@@ -998,6 +1049,7 @@ function App() {
 									</label>
 									{userBooks.length > 0 ? (
 										<select
+											aria-label={t("swap_modal.give_label")}
 											className="w-full p-2 border border-gray-300 rounded focus:ring-secondary focus:border-secondary"
 											value={selectedOwnBook}
 											onChange={(e) => setSelectedOwnBook(e.target.value)}
@@ -1038,7 +1090,10 @@ function App() {
 							</button>
 							<button
 								onClick={handleSendOffer}
-								disabled={offerType === "swap" ? !selectedOwnBook : !offeredAmount || Number(offeredAmount) <= 0}
+								disabled={
+									selectedRequestedBookIds.length === 0 ||
+									(offerType === "swap" ? !selectedOwnBook : !offeredAmount || Number(offeredAmount) <= 0)
+								}
 								className="bg-secondary text-white px-6 py-2 rounded disabled:bg-gray-300 disabled:cursor-not-allowed hover:bg-emerald-600 font-medium"
 							>
 								{t("btn.send_offer")}

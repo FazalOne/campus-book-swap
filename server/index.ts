@@ -207,6 +207,7 @@ const createTables = async () => {
         try {
             await pool.query(`ALTER TABLE swaps ADD COLUMN IF NOT EXISTS "offerType" VARCHAR(20) DEFAULT 'swap'`);
             await pool.query(`ALTER TABLE swaps ADD COLUMN IF NOT EXISTS "offeredAmount" REAL`);
+            await pool.query(`ALTER TABLE swaps ADD COLUMN IF NOT EXISTS "requestedBookIds" JSONB`);
         } catch (e) {
             console.log("Swaps offerType/offeredAmount schema update check ignored");
         }
@@ -282,6 +283,7 @@ const createTables = async () => {
         "proposedById" INTEGER REFERENCES users(id) ON DELETE CASCADE,
         "offeredBookIds" JSONB,
         "requestedBookId" VARCHAR(255),
+        "requestedBookIds" JSONB,
         message TEXT,
         "createdAt" TEXT
       );
@@ -406,6 +408,22 @@ const isNonEmptyString = (value: any, maxLen = 500) =>
 const toPositiveInt = (value: any) => {
     const n = Number(value);
     return Number.isInteger(n) && n > 0 ? n : null;
+};
+
+const normalizeBookIdArray = (value: any) => {
+    if (!Array.isArray(value)) return [];
+    const unique = new Set<string>();
+    for (const raw of value) {
+        if (isNonEmptyString(raw, 255)) unique.add(String(raw).trim());
+    }
+    return Array.from(unique);
+};
+
+const getRequestedBookIds = (payload: any) => {
+    const requestedBookIds = normalizeBookIdArray(payload?.requestedBookIds);
+    if (requestedBookIds.length > 0) return requestedBookIds;
+    if (isNonEmptyString(payload?.requestedBookId, 255)) return [String(payload.requestedBookId).trim()];
+    return [];
 };
 
 const allowedMessageTypes = new Set(['text', 'image', 'location', 'book_card']);
@@ -814,7 +832,7 @@ app.get('/api/admin/swaps-details', authenticateToken, checkRole(['super_admin',
 
         const allBookIds = new Set<string>();
         for (const s of swapsRes.rows) {
-            if (s.requestedBookId) allBookIds.add(s.requestedBookId);
+            for (const id of getRequestedBookIds(s)) allBookIds.add(id);
             if (Array.isArray(s.offeredBookIds)) {
                 for (const id of s.offeredBookIds) allBookIds.add(id);
             }
@@ -831,6 +849,7 @@ app.get('/api/admin/swaps-details', authenticateToken, checkRole(['super_admin',
             ...s,
             offeredById: s.offeredById?.toString(),
             offeredToId: s.offeredToId?.toString(),
+            requestedBookIds: getRequestedBookIds(s),
             offeredBooks: (s.offeredBookIds || []).map((id: string) => ({
                 id,
                 title: booksMap[id]?.title || 'Unknown',
@@ -845,19 +864,19 @@ app.get('/api/admin/swaps-details', authenticateToken, checkRole(['super_admin',
                 department: booksMap[id]?.department || '',
                 course: booksMap[id]?.course || ''
             })),
-            requestedBook: s.requestedBookId ? {
-                id: s.requestedBookId,
-                title: booksMap[s.requestedBookId]?.title || 'Unknown',
-                status: booksMap[s.requestedBookId]?.status || 'Unknown',
-                ownerId: booksMap[s.requestedBookId]?.ownerId?.toString() || null,
-                author: booksMap[s.requestedBookId]?.author || '',
-                imageUrl: booksMap[s.requestedBookId]?.imageUrl || '',
-                price: booksMap[s.requestedBookId]?.price ?? null,
-                forSwap: !!booksMap[s.requestedBookId]?.forSwap,
-                forSale: !!booksMap[s.requestedBookId]?.forSale,
-                condition: booksMap[s.requestedBookId]?.condition || '',
-                department: booksMap[s.requestedBookId]?.department || '',
-                course: booksMap[s.requestedBookId]?.course || ''
+            requestedBook: getRequestedBookIds(s)[0] ? {
+                id: getRequestedBookIds(s)[0],
+                title: booksMap[getRequestedBookIds(s)[0]]?.title || 'Unknown',
+                status: booksMap[getRequestedBookIds(s)[0]]?.status || 'Unknown',
+                ownerId: booksMap[getRequestedBookIds(s)[0]]?.ownerId?.toString() || null,
+                author: booksMap[getRequestedBookIds(s)[0]]?.author || '',
+                imageUrl: booksMap[getRequestedBookIds(s)[0]]?.imageUrl || '',
+                price: booksMap[getRequestedBookIds(s)[0]]?.price ?? null,
+                forSwap: !!booksMap[getRequestedBookIds(s)[0]]?.forSwap,
+                forSale: !!booksMap[getRequestedBookIds(s)[0]]?.forSale,
+                condition: booksMap[getRequestedBookIds(s)[0]]?.condition || '',
+                department: booksMap[getRequestedBookIds(s)[0]]?.department || '',
+                course: booksMap[getRequestedBookIds(s)[0]]?.course || ''
             } : null
         }));
         res.json(payload);
@@ -1243,6 +1262,21 @@ app.post('/api/chats/:id/pin', authenticateToken, async (req, res) => {
     } catch (e) { res.status(500).send('Pin failed'); }
 });
 
+app.get('/api/chats/:id/pin', authenticateToken, async (req, res) => {
+    const userId = parseInt((req as any).user.id);
+    const chatId = req.params.id;
+    try {
+        const chatRes = await pool.query('SELECT "participantIds" FROM chats WHERE id = $1', [chatId]);
+        if (chatRes.rows.length === 0) return res.status(404).send('Chat not found');
+        if (!(chatRes.rows[0].participantIds || []).includes(userId.toString())) return res.status(403).send('Not authorized');
+        const pinRes = await pool.query(
+            'SELECT 1 FROM chat_pins WHERE "userId" = $1 AND "chatId" = $2 LIMIT 1',
+            [userId, chatId],
+        );
+        res.json({ pinned: pinRes.rows.length > 0 });
+    } catch (e) { res.status(500).send('Pin status failed'); }
+});
+
 app.delete('/api/chats/:id/pin', authenticateToken, async (req, res) => {
     const userId = parseInt((req as any).user.id);
     try {
@@ -1288,6 +1322,7 @@ app.post('/api/chats/:id/hide', authenticateToken, async (req, res) => {
         if (chatRes.rows.length === 0) return res.status(404).send("Chat not found");
 
         const chat = chatRes.rows[0];
+        if (!(chat.participantIds || []).includes(userId)) return res.status(403).send("Not authorized");
         const currentHidden = chat.hiddenBy || [];
         const currentCleared = chat.clearedHistoryAt || {};
 
@@ -1347,8 +1382,10 @@ app.post('/api/chats', authenticateToken, async (req, res) => {
 app.post('/api/chats/:id/read', authenticateToken, async (req, res) => {
     const userId = parseInt((req as any).user.id);
     try {
-        const chatRes = await pool.query('SELECT "lastSenderId" FROM chats WHERE id = $1', [req.params.id]);
-        if (chatRes.rows.length > 0 && chatRes.rows[0].lastSenderId !== userId) {
+        const chatRes = await pool.query('SELECT "participantIds", "lastSenderId" FROM chats WHERE id = $1', [req.params.id]);
+        if (chatRes.rows.length === 0) return res.status(404).send("Chat not found");
+        if (!(chatRes.rows[0].participantIds || []).includes(String(userId))) return res.status(403).send("Not authorized");
+        if (chatRes.rows[0].lastSenderId !== userId) {
             await pool.query('UPDATE messages SET "isRead" = TRUE WHERE "chatThreadId" = $1 AND "senderId" != $2', [req.params.id, userId]);
             await pool.query('UPDATE chats SET "unreadMessages" = 0 WHERE id = $1', [req.params.id]);
         }
@@ -1491,7 +1528,8 @@ app.post('/api/swaps', authenticateToken, async (req, res) => {
         if (!isNonEmptyString(swap.id, 255)) return res.status(400).send("Invalid swap id");
         const offeredToId = toPositiveInt(swap.offeredToId);
         if (!offeredToId) return res.status(400).send("Invalid offeredToId");
-        if (!isNonEmptyString(swap.requestedBookId, 255)) return res.status(400).send("Invalid requestedBookId");
+        const requestedBookIds = getRequestedBookIds(swap);
+        if (requestedBookIds.length === 0) return res.status(400).send("Invalid requested books");
         const offerType = swap.offerType === 'buy' ? 'buy' : 'swap';
         const offeredAmount = swap.offeredAmount !== undefined && swap.offeredAmount !== null ? Number(swap.offeredAmount) : null;
         if (String(offeredToId) === String(userId)) return res.status(400).send("Cannot create swap with yourself");
@@ -1500,17 +1538,22 @@ app.post('/api/swaps', authenticateToken, async (req, res) => {
         if (!recipientRole) return res.status(404).send("Offered-to user not found");
         if (recipientRole !== 'user') return res.status(403).send("Cannot send offers to admin/moderator accounts");
 
-        const requestedBookRes = await pool.query('SELECT "ownerId", status, "forSale", "forSwap" FROM books WHERE id = $1', [swap.requestedBookId]);
-        if (requestedBookRes.rows.length === 0) return res.status(404).send("Requested book not found");
-        if (String(requestedBookRes.rows[0].ownerId) !== String(offeredToId)) return res.status(400).send("Requested book does not belong to offeredTo user");
-        if (requestedBookRes.rows[0].status !== 'Available') return res.status(400).send("Requested book is not available");
+        const requestedBookRes = await pool.query(
+            'SELECT id, "ownerId", status, "forSale", "forSwap" FROM books WHERE id = ANY($1)',
+            [requestedBookIds],
+        );
+        if (requestedBookRes.rows.length !== requestedBookIds.length) return res.status(404).send("One or more requested books were not found");
+        for (const b of requestedBookRes.rows) {
+            if (String(b.ownerId) !== String(offeredToId)) return res.status(400).send("All requested books must belong to offeredTo user");
+            if (b.status !== 'Available') return res.status(400).send("One or more requested books are not available");
+        }
 
         if (offerType === 'buy') {
-            if (!requestedBookRes.rows[0].forSale) return res.status(400).send("Book is not listed for sale");
+            if (!requestedBookRes.rows.every((b: any) => !!b.forSale)) return res.status(400).send("All requested books must be listed for sale");
             if (!offeredAmount || Number.isNaN(offeredAmount) || offeredAmount <= 0) return res.status(400).send("Invalid offeredAmount");
             swap.offeredBookIds = [];
         } else {
-            if (!requestedBookRes.rows[0].forSwap) return res.status(400).send("Book is not listed for swap");
+            if (!requestedBookRes.rows.every((b: any) => !!b.forSwap)) return res.status(400).send("All requested books must be listed for swap");
             if (!Array.isArray(swap.offeredBookIds) || swap.offeredBookIds.length === 0 || !swap.offeredBookIds.every((id: any) => isNonEmptyString(id, 255))) {
                 return res.status(400).send("Invalid offeredBookIds");
             }
@@ -1522,9 +1565,12 @@ app.post('/api/swaps', authenticateToken, async (req, res) => {
             }
         }
 
-        await pool.query('INSERT INTO swaps (id, "offeredById", "offeredToId", "offeredBookIds", "requestedBookId", "offerType", "offeredAmount", status, message, "creationDate", "lastUpdateDate") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)', [swap.id, userId, swap.offeredToId, JSON.stringify(swap.offeredBookIds), swap.requestedBookId, offerType, offeredAmount, swap.status, swap.message, swap.creationDate, swap.lastUpdateDate]);
+        await pool.query(
+            'INSERT INTO swaps (id, "offeredById", "offeredToId", "offeredBookIds", "requestedBookId", "requestedBookIds", "offerType", "offeredAmount", status, message, "creationDate", "lastUpdateDate") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)',
+            [swap.id, userId, swap.offeredToId, JSON.stringify(swap.offeredBookIds), requestedBookIds[0], JSON.stringify(requestedBookIds), offerType, offeredAmount, swap.status, swap.message, swap.creationDate, swap.lastUpdateDate],
+        );
         await logSwapAudit(String(swap.id), Number(userId), 'OFFER_CREATED', `type=${offerType}`);
-        res.json(swap);
+        res.json({ ...swap, requestedBookId: requestedBookIds[0], requestedBookIds });
     } catch (e) { res.status(500).send("Failed to create swap"); }
 });
 
@@ -1542,23 +1588,47 @@ app.get('/api/swaps/:id/counters', authenticateToken, async (req, res) => {
 
 app.post('/api/swaps/:id/counter', authenticateToken, async (req, res) => {
     const userId = (req as any).user.id;
-    const { offeredBookIds, requestedBookId, message } = req.body;
+    const { offeredBookIds, requestedBookId, requestedBookIds, message } = req.body;
     try {
         const swapRes = await pool.query('SELECT * FROM swaps WHERE id = $1', [req.params.id]);
         if (swapRes.rows.length === 0) return res.status(404).send('Swap not found');
         const swap = swapRes.rows[0];
         if (swap.status !== 'Pending') return res.status(400).send('Counter offer is only allowed for pending swaps');
         if (String(swap.offeredById) !== String(userId) && String(swap.offeredToId) !== String(userId)) return res.status(403).send('Not authorized');
-        if (!Array.isArray(offeredBookIds) || offeredBookIds.length === 0) return res.status(400).send('Invalid offeredBookIds');
-        if (!isNonEmptyString(requestedBookId, 255)) return res.status(400).send('Invalid requestedBookId');
+        const normalizedOfferedBookIds = normalizeBookIdArray(offeredBookIds);
+        const normalizedRequestedBookIds = getRequestedBookIds({ requestedBookId, requestedBookIds });
+        if (normalizedOfferedBookIds.length === 0) return res.status(400).send('Invalid offeredBookIds');
+        if (normalizedRequestedBookIds.length === 0) return res.status(400).send('Invalid requested books');
+        const counterpartyId = String(userId) === String(swap.offeredById) ? swap.offeredToId : swap.offeredById;
+        const requesterId = Number(userId);
+        const requestedRes = await pool.query(
+            'SELECT id, "ownerId", status, "forSale", "forSwap" FROM books WHERE id = ANY($1)',
+            [normalizedRequestedBookIds],
+        );
+        if (requestedRes.rows.length !== normalizedRequestedBookIds.length) return res.status(404).send('One or more requested books not found');
+        for (const b of requestedRes.rows) {
+            if (String(b.ownerId) !== String(counterpartyId)) return res.status(400).send('Requested books must belong to the counterparty');
+            if (b.status !== 'Available' && b.status !== 'Reserved') return res.status(400).send('Requested books must be available or reserved');
+            if (swap.offerType === 'buy' && !b.forSale) return res.status(400).send('Requested books must be listed for sale');
+            if (swap.offerType !== 'buy' && !b.forSwap) return res.status(400).send('Requested books must be listed for swap');
+        }
+        const offeredRes = await pool.query(
+            'SELECT id, "ownerId", status FROM books WHERE id = ANY($1)',
+            [normalizedOfferedBookIds],
+        );
+        if (offeredRes.rows.length !== normalizedOfferedBookIds.length) return res.status(404).send('One or more offered books not found');
+        for (const b of offeredRes.rows) {
+            if (String(b.ownerId) !== String(requesterId)) return res.status(400).send('You can only offer your own books');
+            if (b.status !== 'Available' && b.status !== 'Reserved') return res.status(400).send('Offered books must be available or reserved');
+        }
 
         await pool.query(
-            'INSERT INTO swap_counters ("swapId", "proposedById", "offeredBookIds", "requestedBookId", message, "createdAt") VALUES ($1, $2, $3, $4, $5, $6)',
-            [req.params.id, userId, JSON.stringify(offeredBookIds), requestedBookId, message || '', new Date().toISOString()]
+            'INSERT INTO swap_counters ("swapId", "proposedById", "offeredBookIds", "requestedBookId", "requestedBookIds", message, "createdAt") VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            [req.params.id, userId, JSON.stringify(normalizedOfferedBookIds), normalizedRequestedBookIds[0], JSON.stringify(normalizedRequestedBookIds), message || '', new Date().toISOString()]
         );
         await pool.query(
-            'UPDATE swaps SET "offeredBookIds" = $1, "requestedBookId" = $2, message = $3, "lastUpdateDate" = $4 WHERE id = $5',
-            [JSON.stringify(offeredBookIds), requestedBookId, message || swap.message || '', new Date().toISOString(), req.params.id]
+            'UPDATE swaps SET "offeredBookIds" = $1, "requestedBookId" = $2, "requestedBookIds" = $3, message = $4, "lastUpdateDate" = $5 WHERE id = $6',
+            [JSON.stringify(normalizedOfferedBookIds), normalizedRequestedBookIds[0], JSON.stringify(normalizedRequestedBookIds), message || swap.message || '', new Date().toISOString(), req.params.id]
         );
         res.json({ success: true });
     } catch (e) { res.status(500).send('Counter offer failed'); }
@@ -1577,7 +1647,9 @@ app.delete('/api/swaps/:id', authenticateToken, async (req, res) => {
 
         // Revert book statuses if they are in Requested/Reserved
         try {
-            await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [swap.requestedBookId]);
+            for (const requestedBookId of getRequestedBookIds(swap)) {
+                await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [requestedBookId]);
+            }
             if (swap.offeredBookIds && Array.isArray(swap.offeredBookIds)) {
                 for (const bookId of swap.offeredBookIds) {
                     await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND (status = 'Requested' OR status = 'Reserved')", [bookId]);
@@ -1629,6 +1701,7 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
         // Completed: require confirmations from both participants before transfer
         if (status === 'Completed') {
             if (swap.status !== 'Accepted') return res.status(400).send('Swap must be Accepted before completing.');
+            const requestedBookIds = getRequestedBookIds(swap);
             await pool.query(
                 `INSERT INTO swap_completion_confirms ("swapId", "userId", "confirmedAt")
                  VALUES ($1,$2,$3)
@@ -1675,22 +1748,22 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
                         );
                     }
                 }
-                if (swap.requestedBookId) {
+                for (const requestedBookId of requestedBookIds) {
                     const requestedBookSnapshotRes = await client.query(
                         'SELECT id, title, author, isbn, "imageUrl", "ownerId" FROM books WHERE id = $1',
-                        [swap.requestedBookId]
+                        [requestedBookId]
                     );
                     const requestedBookSnapshot = requestedBookSnapshotRes.rows[0];
-                    await client.query('UPDATE books SET "ownerId" = $1, status = $2, "forSwap" = $3, "forSale" = $4 WHERE id = $5', [swap.offeredById, 'Swapped', false, false, swap.requestedBookId]);
-                    await client.query('INSERT INTO book_inventory_events ("bookId","userId","eventType",note,"createdAt") VALUES ($1,$2,$3,$4,$5)', [swap.requestedBookId, swap.offeredById, 'RECEIVED_SWAP', `Received from user ${swap.offeredToId}`, new Date().toISOString()]);
-                    await client.query('INSERT INTO book_inventory_events ("bookId","userId","eventType",note,"createdAt") VALUES ($1,$2,$3,$4,$5)', [swap.requestedBookId, swap.offeredToId, 'TRANSFERRED_OUT', `Transferred to user ${swap.offeredById}`, new Date().toISOString()]);
+                    await client.query('UPDATE books SET "ownerId" = $1, status = $2, "forSwap" = $3, "forSale" = $4 WHERE id = $5', [swap.offeredById, 'Swapped', false, false, requestedBookId]);
+                    await client.query('INSERT INTO book_inventory_events ("bookId","userId","eventType",note,"createdAt") VALUES ($1,$2,$3,$4,$5)', [requestedBookId, swap.offeredById, 'RECEIVED_SWAP', `Received from user ${swap.offeredToId}`, new Date().toISOString()]);
+                    await client.query('INSERT INTO book_inventory_events ("bookId","userId","eventType",note,"createdAt") VALUES ($1,$2,$3,$4,$5)', [requestedBookId, swap.offeredToId, 'TRANSFERRED_OUT', `Transferred to user ${swap.offeredById}`, new Date().toISOString()]);
                     await client.query(
                         `INSERT INTO book_ownership_history
                          ("swapId","bookId",title,author,isbn,"imageUrl","fromUserId","toUserId","transferKind",note,"createdAt")
                          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
                         [
                             req.params.id,
-                            swap.requestedBookId,
+                            requestedBookId,
                             requestedBookSnapshot?.title || null,
                             requestedBookSnapshot?.author || null,
                             requestedBookSnapshot?.isbn || null,
@@ -1726,18 +1799,18 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
         await logSwapAudit(req.params.id, Number(currentUserId), `STATUS_${status.toUpperCase()}`, `status changed to ${status}`);
 
         if (status === 'Accepted') {
-            const affectedBookIds: string[] = [updatedSwap.requestedBookId, ...((updatedSwap.offeredBookIds || []) as string[])].filter(Boolean);
+            const affectedBookIds: string[] = [...getRequestedBookIds(updatedSwap), ...((updatedSwap.offeredBookIds || []) as string[])].filter(Boolean);
             for (const bookId of affectedBookIds) {
                 await pool.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [bookId]);
             }
 
             // reject competing pending offers involving same reserved books
             const competingRes = await pool.query(
-                `SELECT id, "offeredById", "offeredToId", "requestedBookId"
+                `SELECT id, "offeredById", "offeredToId", "requestedBookId", "requestedBookIds"
                  FROM swaps
                  WHERE id <> $1
                    AND status = 'Pending'
-                   AND ("requestedBookId" = ANY($2) OR "offeredBookIds" ?| $2)`,
+                  AND ("requestedBookId" = ANY($2) OR "offeredBookIds" ?| $2 OR "requestedBookIds" ?| $2)`,
                 [updatedSwap.id, affectedBookIds]
             );
             if (competingRes.rows.length > 0) {
@@ -1752,17 +1825,23 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
                     const msg = isTr
                         ? 'Teklif, ilgili kitap başka bir teklifte kabul edildiği için otomatik reddedildi.'
                         : 'Offer was automatically rejected because this book was accepted in another offer.';
-                    await sendSystemSwapMessage(String(c.offeredById), String(c.offeredToId), c.requestedBookId || null, Number(currentUserId), msg);
+                    const messageBookId = getRequestedBookIds(c)[0] || c.requestedBookId || null;
+                    await sendSystemSwapMessage(String(c.offeredById), String(c.offeredToId), messageBookId, Number(currentUserId), msg);
                 }
             }
 
-            const bookRes = await pool.query('SELECT title FROM books WHERE id = $1', [updatedSwap.requestedBookId]);
-            const bookTitle = (bookRes.rows[0] && bookRes.rows[0].title) || 'the book';
+            const primaryRequestedBookId = getRequestedBookIds(updatedSwap)[0] || updatedSwap.requestedBookId;
+            const bookRes = await pool.query('SELECT title FROM books WHERE id = $1', [primaryRequestedBookId]);
+            const bookTitle = getRequestedBookIds(updatedSwap).length > 1
+                ? `${(bookRes.rows[0] && bookRes.rows[0].title) || 'the selected books'} (+${getRequestedBookIds(updatedSwap).length - 1} more)`
+                : ((bookRes.rows[0] && bookRes.rows[0].title) || 'the book');
             const autoMsg = isTr ? `Merhaba! "${bookTitle}" için teklifi kabul ettim.` : `Hello! I accepted the offer for "${bookTitle}".`;
-            await sendSystemSwapMessage(String(updatedSwap.offeredToId), String(updatedSwap.offeredById), updatedSwap.requestedBookId || null, Number(currentUserId), autoMsg);
+            await sendSystemSwapMessage(String(updatedSwap.offeredToId), String(updatedSwap.offeredById), primaryRequestedBookId || null, Number(currentUserId), autoMsg);
         } else if (status === 'Rejected' || status === 'Cancelled') {
             await pool.query('DELETE FROM swap_completion_confirms WHERE "swapId" = $1', [req.params.id]);
-            await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND status = 'Reserved'", [updatedSwap.requestedBookId]);
+            for (const requestedBookId of getRequestedBookIds(updatedSwap)) {
+                await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND status = 'Reserved'", [requestedBookId]);
+            }
             if (updatedSwap.offeredBookIds && Array.isArray(updatedSwap.offeredBookIds)) {
                 for (const bookId of updatedSwap.offeredBookIds) {
                     await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND status = 'Reserved'", [bookId]);

@@ -106,6 +106,14 @@ export const ChatPage: React.FC<{
 	}, [otherUserId]);
 
 	useEffect(() => {
+		if (!chatId) return;
+		api
+			.get<{ pinned: boolean }>(`/chats/${chatId}/pin`)
+			.then((r) => setIsPinned(!!r.pinned))
+			.catch(() => setIsPinned(false));
+	}, [chatId]);
+
+	useEffect(() => {
 		if (chatId) {
 			const fetchMessages = () => {
 				api
@@ -840,11 +848,13 @@ export const ChatPage: React.FC<{
 							type="file"
 							ref={fileInputRef}
 							accept="image/*"
+							aria-label="Upload image"
 							className="hidden"
 							onChange={handleFileUpload}
 						/>
 						<button
 							onClick={() => fileInputRef.current?.click()}
+							title="Upload image"
 							className="text-gray-500 hover:text-primary transition p-1 cursor-pointer"
 						>
 							<PhotoIcon className="w-6 h-6" />
