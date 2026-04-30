@@ -288,6 +288,11 @@ const createTables = async () => {
         "createdAt" TEXT
       );
     `);
+        try {
+            await pool.query(`ALTER TABLE swap_counters ADD COLUMN IF NOT EXISTS "requestedBookIds" JSONB`);
+        } catch (e) {
+            console.log("swap_counters requestedBookIds schema update check ignored");
+        }
 
         await pool.query(`
       CREATE TABLE IF NOT EXISTS swap_audit_logs (
@@ -845,40 +850,44 @@ app.get('/api/admin/swaps-details', authenticateToken, checkRole(['super_admin',
             for (const b of booksRes.rows) booksMap[b.id] = b;
         }
 
-        const payload = swapsRes.rows.map((s) => ({
-            ...s,
-            offeredById: s.offeredById?.toString(),
-            offeredToId: s.offeredToId?.toString(),
-            requestedBookIds: getRequestedBookIds(s),
-            offeredBooks: (s.offeredBookIds || []).map((id: string) => ({
-                id,
-                title: booksMap[id]?.title || 'Unknown',
-                author: booksMap[id]?.author || '',
-                status: booksMap[id]?.status || 'Unknown',
-                ownerId: booksMap[id]?.ownerId?.toString() || null,
-                imageUrl: booksMap[id]?.imageUrl || '',
-                price: booksMap[id]?.price ?? null,
-                forSwap: !!booksMap[id]?.forSwap,
-                forSale: !!booksMap[id]?.forSale,
-                condition: booksMap[id]?.condition || '',
-                department: booksMap[id]?.department || '',
-                course: booksMap[id]?.course || ''
-            })),
-            requestedBook: getRequestedBookIds(s)[0] ? {
-                id: getRequestedBookIds(s)[0],
-                title: booksMap[getRequestedBookIds(s)[0]]?.title || 'Unknown',
-                status: booksMap[getRequestedBookIds(s)[0]]?.status || 'Unknown',
-                ownerId: booksMap[getRequestedBookIds(s)[0]]?.ownerId?.toString() || null,
-                author: booksMap[getRequestedBookIds(s)[0]]?.author || '',
-                imageUrl: booksMap[getRequestedBookIds(s)[0]]?.imageUrl || '',
-                price: booksMap[getRequestedBookIds(s)[0]]?.price ?? null,
-                forSwap: !!booksMap[getRequestedBookIds(s)[0]]?.forSwap,
-                forSale: !!booksMap[getRequestedBookIds(s)[0]]?.forSale,
-                condition: booksMap[getRequestedBookIds(s)[0]]?.condition || '',
-                department: booksMap[getRequestedBookIds(s)[0]]?.department || '',
-                course: booksMap[getRequestedBookIds(s)[0]]?.course || ''
-            } : null
-        }));
+        const payload = swapsRes.rows.map((s) => {
+            const requestedBookIds = getRequestedBookIds(s);
+            const primaryRequestedBookId = requestedBookIds[0];
+            return {
+                ...s,
+                offeredById: s.offeredById?.toString(),
+                offeredToId: s.offeredToId?.toString(),
+                requestedBookIds,
+                offeredBooks: (s.offeredBookIds || []).map((id: string) => ({
+                    id,
+                    title: booksMap[id]?.title || 'Unknown',
+                    author: booksMap[id]?.author || '',
+                    status: booksMap[id]?.status || 'Unknown',
+                    ownerId: booksMap[id]?.ownerId?.toString() || null,
+                    imageUrl: booksMap[id]?.imageUrl || '',
+                    price: booksMap[id]?.price ?? null,
+                    forSwap: !!booksMap[id]?.forSwap,
+                    forSale: !!booksMap[id]?.forSale,
+                    condition: booksMap[id]?.condition || '',
+                    department: booksMap[id]?.department || '',
+                    course: booksMap[id]?.course || ''
+                })),
+                requestedBook: primaryRequestedBookId ? {
+                    id: primaryRequestedBookId,
+                    title: booksMap[primaryRequestedBookId]?.title || 'Unknown',
+                    status: booksMap[primaryRequestedBookId]?.status || 'Unknown',
+                    ownerId: booksMap[primaryRequestedBookId]?.ownerId?.toString() || null,
+                    author: booksMap[primaryRequestedBookId]?.author || '',
+                    imageUrl: booksMap[primaryRequestedBookId]?.imageUrl || '',
+                    price: booksMap[primaryRequestedBookId]?.price ?? null,
+                    forSwap: !!booksMap[primaryRequestedBookId]?.forSwap,
+                    forSale: !!booksMap[primaryRequestedBookId]?.forSale,
+                    condition: booksMap[primaryRequestedBookId]?.condition || '',
+                    department: booksMap[primaryRequestedBookId]?.department || '',
+                    course: booksMap[primaryRequestedBookId]?.course || ''
+                } : null
+            };
+        });
         res.json(payload);
     } catch (e) { res.status(500).send("Failed to fetch swap details"); }
 });
@@ -1571,7 +1580,7 @@ app.post('/api/swaps', authenticateToken, async (req, res) => {
         );
         await logSwapAudit(String(swap.id), Number(userId), 'OFFER_CREATED', `type=${offerType}`);
         res.json({ ...swap, requestedBookId: requestedBookIds[0], requestedBookIds });
-    } catch (e) { res.status(500).send("Failed to create swap"); }
+    } catch (e) { console.error('Failed to create swap:', e); res.status(500).send("Failed to create swap"); }
 });
 
 app.get('/api/swaps/:id/counters', authenticateToken, async (req, res) => {
@@ -1631,7 +1640,7 @@ app.post('/api/swaps/:id/counter', authenticateToken, async (req, res) => {
             [JSON.stringify(normalizedOfferedBookIds), normalizedRequestedBookIds[0], JSON.stringify(normalizedRequestedBookIds), message || swap.message || '', new Date().toISOString(), req.params.id]
         );
         res.json({ success: true });
-    } catch (e) { res.status(500).send('Counter offer failed'); }
+    } catch (e) { console.error('Counter offer failed:', e); res.status(500).send('Counter offer failed'); }
 });
 
 app.delete('/api/swaps/:id', authenticateToken, async (req, res) => {
@@ -1792,35 +1801,60 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
             }
         }
 
-        // Default: update status and then handle book/chat updates
-        const upd = await pool.query('UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3 RETURNING *', [status, new Date().toISOString(), req.params.id]);
-        if (!(upd.rowCount && upd.rowCount > 0)) return res.status(404).send('Swap not found');
-        const updatedSwap = upd.rows[0];
-        await logSwapAudit(req.params.id, Number(currentUserId), `STATUS_${status.toUpperCase()}`, `status changed to ${status}`);
-
         if (status === 'Accepted') {
-            const affectedBookIds: string[] = [...getRequestedBookIds(updatedSwap), ...((updatedSwap.offeredBookIds || []) as string[])].filter(Boolean);
-            for (const bookId of affectedBookIds) {
-                await pool.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [bookId]);
+            const nowIso = new Date().toISOString();
+            let updatedSwap: any = null;
+            let competingRows: any[] = [];
+            const client = await pool.connect();
+            try {
+                await client.query('BEGIN');
+                const upd = await client.query(
+                    'UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3 RETURNING *',
+                    [status, nowIso, req.params.id]
+                );
+                if (!(upd.rowCount && upd.rowCount > 0)) {
+                    await client.query('ROLLBACK');
+                    return res.status(404).send('Swap not found');
+                }
+                updatedSwap = upd.rows[0];
+
+                const affectedBookIds: string[] = [
+                    ...getRequestedBookIds(updatedSwap),
+                    ...((updatedSwap.offeredBookIds || []) as string[]),
+                ].filter(Boolean);
+                for (const bookId of affectedBookIds) {
+                    await client.query("UPDATE books SET status = 'Reserved' WHERE id = $1", [bookId]);
+                }
+
+                // Reject competing pending offers involving same reserved books atomically.
+                const competingRes = await client.query(
+                    `SELECT id, "offeredById", "offeredToId", "requestedBookId", "requestedBookIds"
+                     FROM swaps
+                     WHERE id <> $1
+                       AND status = 'Pending'
+                       AND ("requestedBookId" = ANY($2) OR "offeredBookIds" ?| $2 OR "requestedBookIds" ?| $2)`,
+                    [updatedSwap.id, affectedBookIds]
+                );
+                competingRows = competingRes.rows;
+                if (competingRows.length > 0) {
+                    await client.query(
+                        `UPDATE swaps
+                         SET status = 'Rejected', "lastUpdateDate" = $2
+                         WHERE id = ANY($1)`,
+                        [competingRows.map((r) => r.id), nowIso]
+                    );
+                }
+                await client.query('COMMIT');
+            } catch (err) {
+                await client.query('ROLLBACK');
+                throw err;
+            } finally {
+                client.release();
             }
 
-            // reject competing pending offers involving same reserved books
-            const competingRes = await pool.query(
-                `SELECT id, "offeredById", "offeredToId", "requestedBookId", "requestedBookIds"
-                 FROM swaps
-                 WHERE id <> $1
-                   AND status = 'Pending'
-                  AND ("requestedBookId" = ANY($2) OR "offeredBookIds" ?| $2 OR "requestedBookIds" ?| $2)`,
-                [updatedSwap.id, affectedBookIds]
-            );
-            if (competingRes.rows.length > 0) {
-                await pool.query(
-                    `UPDATE swaps
-                     SET status = 'Rejected', "lastUpdateDate" = $2
-                     WHERE id = ANY($1)`,
-                    [competingRes.rows.map((r) => r.id), new Date().toISOString()]
-                );
-                for (const c of competingRes.rows) {
+            await logSwapAudit(req.params.id, Number(currentUserId), `STATUS_${status.toUpperCase()}`, `status changed to ${status}`);
+            if (competingRows.length > 0) {
+                for (const c of competingRows) {
                     await logSwapAudit(c.id, Number(currentUserId), 'AUTO_REJECTED', `Rejected because related book was accepted in swap ${updatedSwap.id}`);
                     const msg = isTr
                         ? 'Teklif, ilgili kitap başka bir teklifte kabul edildiği için otomatik reddedildi.'
@@ -1829,7 +1863,6 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
                     await sendSystemSwapMessage(String(c.offeredById), String(c.offeredToId), messageBookId, Number(currentUserId), msg);
                 }
             }
-
             const primaryRequestedBookId = getRequestedBookIds(updatedSwap)[0] || updatedSwap.requestedBookId;
             const bookRes = await pool.query('SELECT title FROM books WHERE id = $1', [primaryRequestedBookId]);
             const bookTitle = getRequestedBookIds(updatedSwap).length > 1
@@ -1837,7 +1870,12 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
                 : ((bookRes.rows[0] && bookRes.rows[0].title) || 'the book');
             const autoMsg = isTr ? `Merhaba! "${bookTitle}" için teklifi kabul ettim.` : `Hello! I accepted the offer for "${bookTitle}".`;
             await sendSystemSwapMessage(String(updatedSwap.offeredToId), String(updatedSwap.offeredById), primaryRequestedBookId || null, Number(currentUserId), autoMsg);
+            return res.json({ success: true });
         } else if (status === 'Rejected' || status === 'Cancelled') {
+            const upd = await pool.query('UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3 RETURNING *', [status, new Date().toISOString(), req.params.id]);
+            if (!(upd.rowCount && upd.rowCount > 0)) return res.status(404).send('Swap not found');
+            const updatedSwap = upd.rows[0];
+            await logSwapAudit(req.params.id, Number(currentUserId), `STATUS_${status.toUpperCase()}`, `status changed to ${status}`);
             await pool.query('DELETE FROM swap_completion_confirms WHERE "swapId" = $1', [req.params.id]);
             for (const requestedBookId of getRequestedBookIds(updatedSwap)) {
                 await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND status = 'Reserved'", [requestedBookId]);
@@ -1847,8 +1885,12 @@ app.put('/api/swaps/:id/status', authenticateToken, async (req, res) => {
                     await pool.query("UPDATE books SET status = 'Available' WHERE id = $1 AND status = 'Reserved'", [bookId]);
                 }
             }
+            return res.json({ success: true });
         }
 
+        const upd = await pool.query('UPDATE swaps SET status = $1, "lastUpdateDate" = $2 WHERE id = $3 RETURNING *', [status, new Date().toISOString(), req.params.id]);
+        if (!(upd.rowCount && upd.rowCount > 0)) return res.status(404).send('Swap not found');
+        await logSwapAudit(req.params.id, Number(currentUserId), `STATUS_${status.toUpperCase()}`, `status changed to ${status}`);
         return res.json({ success: true });
     } catch (e) { console.error(e); res.status(500).send('Swap update error'); }
 });

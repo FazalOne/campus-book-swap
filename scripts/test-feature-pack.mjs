@@ -30,7 +30,10 @@ async function createUser(base) {
 
 async function run() {
   const nonce = Date.now();
-  const admin = await req("/auth/login", j(null, { username: "admin", password: "admin" }));
+  let admin = await req("/auth/login", j(null, { username: "admin", password: "admin" }));
+  if (!admin.ok) {
+    admin = await req("/auth/login", j(null, { username: "admin", password: "admin123" }));
+  }
   assert(admin.ok, "admin login failed");
   const adminToken = admin.data.token;
 
@@ -82,7 +85,7 @@ async function run() {
   const swap = await req("/swaps", j(u1.token, { id: swapId, offeredToId: u2.user.id, offeredBookIds: [b1], requestedBookId: b2, status: "Pending", message: "swap", creationDate: now, lastUpdateDate: now }));
   assert(swap.ok, "create swap failed");
   const counter = await req(`/swaps/${swapId}/counter`, j(u2.token, { offeredBookIds: [b2], requestedBookId: b1, message: "counter offer" }));
-  assert(counter.ok, "counter offer failed");
+  assert(counter.ok, `counter offer failed: ${JSON.stringify(counter.data)}`);
   const counters = await req(`/swaps/${swapId}/counters`, { headers: { Authorization: `Bearer ${u1.token}`, Origin: "http://localhost:5173" } });
   assert(counters.ok && Array.isArray(counters.data) && counters.data.length > 0, "fetch counters failed");
 

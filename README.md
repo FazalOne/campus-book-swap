@@ -47,10 +47,10 @@ Includes admin moderation, demo data seeding, and offer audit visibility.
 ├── server/
 │   └── index.ts            # Express API, DB schema, business logic
 ├── scripts/
-│   ├── dev-start.cjs       # runs server + Vite together
-│   ├── split-app-once.mjs  # (maint.) slice App.tsx by line ranges → _extracted/
-│   ├── assemble-split.mjs  # (maint.) build components/pages from slices
-│   └── trim-app.mjs        # (maint.) replace App.tsx with imports + tail slice
+│   ├── dev-start.cjs       # runs backend + Vite together
+│   ├── test-smoke.mjs
+│   ├── test-security-and-flows.mjs
+│   └── test-feature-pack.mjs
 ├── index.html
 ├── vite.config.ts
 └── package.json
@@ -207,12 +207,9 @@ Meaning of each variable (same as the `.env` template above):
 - `npm run start` - backend + frontend together (`scripts/dev-start.cjs`)
 - `npm run build` - production frontend build
 - `npm run preview` - preview built frontend
-
-Optional maintainer scripts (only if you re-split `App.tsx`; see comments in each file for line-number caveats):
-
-- `node scripts/split-app-once.mjs` → writes `src/_extracted/*.txt`
-- `node scripts/assemble-split.mjs` → regenerates `src/components/*` and `src/pages/*` from those slices
-- `node scripts/trim-app.mjs` → trims `App.tsx` to imports + the `function App()` block (must match current line numbers)
+- `npm run test:smoke:live` - basic end-to-end live smoke checks
+- `npm run test:security:live` - auth/permissions + critical flow checks
+- `npm run test:feature-pack:live` - admin/demo/chat/swap feature-pack checks
 
 ## Final Verification Checklist (Before Push)
 

@@ -126,6 +126,20 @@ async function run() {
   });
   assert(msgAfterUnblock.ok, `Message after unblock failed: ${JSON.stringify(msgAfterUnblock.data)}`);
 
+  // Non-participant cannot hide/read someone else's chat
+  const unauthorizedHide = await req(`/chats/${chatIdAB}/hide`, {
+    method: "POST",
+    token: tokenC,
+    body: {},
+  });
+  assert(unauthorizedHide.status === 403, `Expected 403 for unauthorized hide, got ${unauthorizedHide.status}`);
+  const unauthorizedRead = await req(`/chats/${chatIdAB}/read`, {
+    method: "POST",
+    token: tokenC,
+    body: {},
+  });
+  assert(unauthorizedRead.status === 403, `Expected 403 for unauthorized read, got ${unauthorizedRead.status}`);
+
   // Swap permission checks
   const swapId = `deep_swap_${nonce}`;
   const createSwap = await req("/swaps", {
@@ -174,6 +188,71 @@ async function run() {
     body: { status: "Completed", language: "en" },
   });
   assert(goodComplete.ok, `Expected complete to succeed, got ${goodComplete.status}`);
+
+  // Multi-requested-books offer should be accepted and persisted.
+  const bookA2 = `deep_book_a2_${nonce}`;
+  const createA2 = await req("/books", {
+    method: "POST",
+    token: tokenA,
+    body: {
+      id: bookA2, title: "A2", author: "AA2", isbn: "11", edition: "1",
+      course: "C1", department: "D1", condition: "Good", description: "A2",
+      imageUrl: "", price: 15, forSwap: true, forSale: false, listedDate: now
+    },
+  });
+  assert(createA2.ok, `create bookA2 failed: ${JSON.stringify(createA2.data)}`);
+
+  const bookB2 = `deep_book_b2_${nonce}`;
+  const bookB3 = `deep_book_b3_${nonce}`;
+  const createB2 = await req("/books", {
+    method: "POST",
+    token: tokenB,
+    body: {
+      id: bookB2, title: "B2", author: "BB2", isbn: "22", edition: "1",
+      course: "C2", department: "D2", condition: "Good", description: "B2",
+      imageUrl: "", price: 14, forSwap: true, forSale: true, listedDate: now
+    },
+  });
+  assert(createB2.ok, `create bookB2 failed: ${JSON.stringify(createB2.data)}`);
+  const createB3 = await req("/books", {
+    method: "POST",
+    token: tokenB,
+    body: {
+      id: bookB3, title: "B3", author: "BB3", isbn: "23", edition: "1",
+      course: "C2", department: "D2", condition: "Good", description: "B3",
+      imageUrl: "", price: 16, forSwap: true, forSale: true, listedDate: now
+    },
+  });
+  assert(createB3.ok, `create bookB3 failed: ${JSON.stringify(createB3.data)}`);
+
+  const swapMultiId = `deep_swap_multi_${nonce}`;
+  const createSwapMulti = await req("/swaps", {
+    method: "POST",
+    token: tokenA,
+    body: {
+      id: swapMultiId,
+      offeredToId: bob.id,
+      offeredBookIds: [bookA2],
+      requestedBookId: bookB2,
+      requestedBookIds: [bookB2, bookB3],
+      status: "Pending",
+      message: "swap multi?",
+      creationDate: now,
+      lastUpdateDate: now,
+    },
+  });
+  assert(createSwapMulti.ok, `Create multi swap failed: ${JSON.stringify(createSwapMulti.data)}`);
+  const goodAcceptMulti = await req(`/swaps/${swapMultiId}/status`, {
+    method: "PUT",
+    token: tokenB,
+    body: { status: "Accepted", language: "en" },
+  });
+  assert(goodAcceptMulti.ok, `Expected multi accept to succeed, got ${goodAcceptMulti.status}`);
+  const swapsAfterMulti = await req("/swaps", { token: tokenA });
+  assert(swapsAfterMulti.ok && Array.isArray(swapsAfterMulti.data), "Failed to fetch swaps after multi accept");
+  const multiSwapRow = swapsAfterMulti.data.find((s) => s.id === swapMultiId);
+  assert(multiSwapRow && Array.isArray(multiSwapRow.requestedBookIds) && multiSwapRow.requestedBookIds.length === 2,
+    `Expected requestedBookIds length 2, got ${JSON.stringify(multiSwapRow)}`);
 
   // Admin permissions: normal user should not access admin endpoints
   const nonAdminUsers = await req("/admin/users", { token: tokenA });

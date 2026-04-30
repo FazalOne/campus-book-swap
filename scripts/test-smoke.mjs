@@ -191,6 +191,15 @@ async function run() {
     body: { status: "Completed", language: "en" },
   });
   assert(completeSwap.ok, `Complete swap failed: ${JSON.stringify(completeSwap.data)}`);
+  const completeSwapSecondConfirm = await request(`/swaps/${swapId}/status`, {
+    method: "PUT",
+    token: token2,
+    body: { status: "Completed", language: "en" },
+  });
+  assert(
+    completeSwapSecondConfirm.ok,
+    `Second completion confirmation failed: ${JSON.stringify(completeSwapSecondConfirm.data)}`
+  );
 
   const book1After = await request(`/books/${book1Id}`, { token: token1 });
   const book2After = await request(`/books/${book2Id}`, { token: token2 });
