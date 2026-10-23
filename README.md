@@ -34,7 +34,9 @@ A full-stack university second-hand book exchange platform where students list b
 
 ```bash
 npm install
-npm run dev
+npm run dev:all
 ```
+
+`npm run dev:all` starts both the API and frontend. To run only the frontend, use `npm run dev`.
 
 For full setup (including Docker/database env), see `docker-compose.yml` and server environment variables in the project.

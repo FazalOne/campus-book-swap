@@ -46,7 +46,6 @@ process.on('SIGTERM', () => {
 async function findAvailablePort(candidates) {
   const net = require('net');
   for (const p of candidates) {
-    // eslint-disable-next-line no-await-in-loop
     const ok = await new Promise((resolve) => {
       const srv = net.createServer();
       srv.once('error', () => {
@@ -91,9 +90,7 @@ async function findAvailablePort(candidates) {
   for (const p of candidates) {
     // respect explicit envPort if provided
     if (envPort && parseInt(envPort, 10) !== p) continue;
-    /* eslint-disable no-await-in-loop */
     const running = await isViteRunningOn(p);
-    /* eslint-enable no-await-in-loop */
     if (running) { existingVitePort = p; break; }
   }
 
